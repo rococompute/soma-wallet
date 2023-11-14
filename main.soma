@@ -1,20 +1,58 @@
 Require Import Sandbox JSX.
+Import wallet_session.
+Import wallet_ui.
 
 page : element unit :=
   <html>
-    <head><title> "Offline Bitcoin Wallet" </title></head>
+    <head>
+      <title> "Offline Bitcoin Wallet" </title>
+      <style> "body{font-family:system-ui,sans-serif;margin:0 auto;max-width:44rem;padding:1rem;line-height:1.45;color:#1a1a1a}section{border-top:1px solid #c9c9c9;padding:0.75rem 0}h1{font-size:1.5rem}h2{font-size:1.05rem;margin:0.25rem 0}button{font:inherit;padding:0.35rem 0.8rem}textarea{width:100%;box-sizing:border-box}.reason{color:#444}@media (max-width:40rem){body{padding:0.75rem}}" </style>
+    </head>
     <body>
       <main>
         <h1> "Offline Bitcoin Wallet" </h1>
-        <p> "An offline signing workspace." </p>
+        <p> "An offline signing workspace for testnet and regtest. It never broadcasts and must not be used with real keys." </p>
         <section>
-          <h2> "Wallet locked" </h2>
-          <p> "Key import and transaction signing are being developed. Do not load real keys into this development build." </p>
+          <h2> "Status" </h2>
+          <p> (status_line Locked) </p>
+          <p class="reason"> "Signing and export are not connected to this page in this build yet, so their buttons stay disabled everywhere." </p>
+        </section>
+        <section>
+          <h2> "Key import" </h2>
+          <p> "Import a compressed testnet or regtest WIF inside the signing unikernel. Only the public identity (network, public key, address) is ever shown." </p>
+          <p> "No key imported." </p>
+          <button disabled="disabled"> "Import key" </button>
+          <p class="reason"> "Key import is not connected to this page in this build yet." </p>
+        </section>
+        <section>
+          <h2> "PSBT import" </h2>
+          <p> "Paste a PSBT v0 in Base64. It is parsed and bounded before anything is reviewed." </p>
+          <textarea disabled="disabled" rows="4"> "" </textarea>
+          <button disabled="disabled"> "Load PSBT" </button>
+          <p class="reason"> "Import a key first, then load a PSBT." </p>
         </section>
         <section>
           <h2> "Transaction review" </h2>
-          <p> "Import a test PSBT, review every output and the fee, then explicitly approve signing." </p>
+          <p> "No PSBT loaded. When one is, every output, its amount and the fee appear here for review." </p>
+          <button disabled="disabled"> "Approve" </button>
+          <p class="reason"> "Load a PSBT first." </p>
+        </section>
+        <section>
+          <h2> "Signing" </h2>
+          <p> "Signing needs a fresh approval for the exact reviewed PSBT." </p>
           <button disabled="disabled"> "Sign transaction" </button>
+          <p class="reason"> "Review and approve the exact PSBT first." </p>
+        </section>
+        <section>
+          <h2> "Signed PSBT export" </h2>
+          <p> "Nothing has been signed in this session." </p>
+          <button disabled="disabled"> "Export signed PSBT" </button>
+        </section>
+        <section>
+          <h2> "Lock" </h2>
+          <p> "Locking drops the imported key reference and any approval." </p>
+          <button disabled="disabled"> "Lock wallet" </button>
+          <p class="reason"> "The wallet is already locked." </p>
         </section>
       </main>
     </body>

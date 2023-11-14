@@ -121,9 +121,12 @@ become available only in the states the session model allows; signing and
 signed-PSBT export are reported unavailable with their reason in every
 state until a session driver connects them, so no page built on this
 model can present an unconnected operation as working. Session errors
-have user-facing messages here. `main.soma` still serves its locked page
-unchanged in this step; adopting the model in the served markup and
-wiring page actions to the driver remain follow-up work.
+have user-facing messages here. `main.soma` now serves the locked page built on this model: a status
+section plus key-import, PSBT-import, transaction-review, signing,
+signed-export and lock sections, each control disabled with the model's
+reason for the locked state. Wiring page actions to a session driver
+(submitting a WIF or PSBT, rendering a parsed transaction, approving,
+signing, exporting) remains follow-up work, and the page copy says so.
 
 ## Development
 
