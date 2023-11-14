@@ -1,0 +1,129 @@
+(** Signer-internal key custody, not session ownership or signing consent.
+    All foreign effects must be serialized at runtime inside the unikernel.
+    No WIF/scalar is returned. Immutable caller/runtime secret copies are NOT
+    erased by clearing the WASM slot. Handles are valid only in this instance. *)
+Import wallet_keys wallet_key_runtime crypto.signing crypto.key_slot.
+Require Import Crypto.
+
+Inductive slot_error := SlotKeyError (error : key_error)
+  | SlotBridgeError (error : bridge_error) | SlotStaleHandle | SlotExhausted
+  | SlotIdentityMismatch | SlotDerLength.
+Inductive slot_result (A : Type) := SlotOk (value : A) | SlotError (error : slot_error).
+Arguments SlotOk {A} value.
+Arguments SlotError {A} error.
+Inductive key_slot_handle := KeySlotHandle (generation : N).
+Inductive slot_identity := SlotIdentity (handle : key_slot_handle) (public_id : public_identity).
+Inductive slot_signature := SlotSignature (public_key der : kbytes).
+
+slot_status (code : N) : slot_result unit :=
+  if N.eqb code 10 then SlotError SlotStaleHandle else
+  if N.eqb code 11 then SlotError SlotExhausted else
+  match status_of code with
+  | BridgeOk => SlotOk tt | BridgeFailure e => SlotError (SlotBridgeError e) end.
+slot_handle_valid (handle : N) : bool := andb (0 <? handle)%N (handle <=? 65535)%N.
+
+Fixpoint slot_stage_key (index : N) (raw : kbytes) : slot_result unit :=
+  match raw with
+  | [] => SlotOk tt
+  | b :: rest => match slot_status (slot_key_byte index (runtime_byte b)) with
+    | SlotError e => SlotError e | SlotOk _ => slot_stage_key (index + 1)%N rest end
+  end.
+Fixpoint slot_stage_digest (index : N) (raw : kbytes) : slot_result unit :=
+  match raw with
+  | [] => SlotOk tt
+  | b :: rest => match slot_status (slot_digest_byte index (runtime_byte b)) with
+    | SlotError e => SlotError e | SlotOk _ => slot_stage_digest (index + 1)%N rest end
+  end.
+Fixpoint slot_read (reader : N -> N) (remaining : nat) (index : N) : slot_result kbytes :=
+  match remaining with
+  | O => SlotOk []
+  | S n => match byte_of (reader index) with
+    | ByteFailure e => SlotError (SlotBridgeError e)
+    | PublicByte b => match slot_read reader n (index + 1)%N with
+      | SlotError e => SlotError e | SlotOk rest => SlotOk (public_byte b :: rest) end
+    end
+  end.
+
+(** Public results survive transient clearing; the retained scalar does too. *)
+finish_slot_public {A : Type} (result : slot_result A) : slot_result A :=
+  match result with
+  | SlotOk value => match slot_status (slot_clear_transient 0) with
+    | SlotOk _ => SlotOk value | SlotError e => SlotError e end
+  | SlotError error => match slot_status (slot_clear_transient 0) with
+    | SlotOk _ => SlotError error | SlotError e => SlotError e end
+  end.
+(** An import failure must also destroy any earlier usable key. *)
+finish_slot_import (result : slot_result slot_identity) : slot_result slot_identity :=
+  match result with
+  | SlotOk value => match slot_status (slot_clear_transient 0) with
+    | SlotOk _ => SlotOk value
+    | SlotError error => match slot_status (slot_lock 0) with
+      | SlotOk _ => SlotError error | SlotError e => SlotError e end
+    end
+  | SlotError error => match slot_status (slot_lock 0) with
+    | SlotOk _ => SlotError error | SlotError e => SlotError e end
+  end.
+
+import_slot_decoded (net : network) (key : kbytes) : slot_result slot_identity :=
+  if negb (len_is key 32) then SlotError (SlotKeyError WifBadLength) else
+  if negb (octets_valid key) then SlotError (SlotKeyError ByteOutOfRange) else
+  match slot_status (slot_begin_import 32) with
+  | SlotError e => SlotError e
+  | SlotOk _ => match slot_stage_key 0 key with
+    | SlotError e => SlotError e
+    | SlotOk _ => match slot_status (slot_commit_import 0) with
+      | SlotError e => SlotError e
+      | SlotOk _ => let handle := slot_handle 0 in
+        if negb (slot_handle_valid handle) then SlotError SlotStaleHandle else
+        match slot_read slot_public_byte 33 0 with
+        | SlotError e => SlotError e
+        | SlotOk pub => match identity_of_pubkey net pub with
+          | KFail e => SlotError (SlotKeyError e)
+          | KDone public_id => SlotOk (SlotIdentity (KeySlotHandle handle) public_id)
+          end
+        end
+      end
+    end
+  end.
+
+(** External entry: invalidate the old slot BEFORE bounded WIF decoding.
+    A failed or malformed replacement can never leave that key available. *)
+import_slot_wif (net : network) (wif : string) : slot_result slot_identity :=
+  match slot_status (slot_lock 0) with
+  | SlotError e => SlotError e
+  | SlotOk _ => finish_slot_import (match decode_runtime_wif wif with
+    | KFail e => SlotError (SlotKeyError e)
+    | KDone key => import_slot_decoded net key end)
+  end.
+
+sign_slot_staged (handle : N) (expected digest : kbytes) : slot_result slot_signature :=
+  match slot_status (slot_begin_digest handle 32) with
+  | SlotError e => SlotError e
+  | SlotOk _ => match slot_stage_digest 0 digest with
+    | SlotError e => SlotError e
+    | SlotOk _ => match slot_status (slot_sign handle) with
+      | SlotError e => SlotError e
+      | SlotOk _ => match slot_read slot_public_byte 33 0 with
+        | SlotError e => SlotError e
+        | SlotOk pub => if negb (k_bytes_eq expected pub) then SlotError SlotIdentityMismatch else
+          let size := slot_der_size 0 in
+          if negb (andb (8 <=? size)%N (size <=? 72)%N) then SlotError SlotDerLength else
+          match slot_read slot_der_byte (N.to_nat size) 0 with
+          | SlotError e => SlotError e | SlotOk der => SlotOk (SlotSignature pub der) end
+        end
+      end
+    end
+  end.
+
+(** Internal primitive only: a key handle conveys NO approval. The future
+    authoritative session owner must save fresh consent before invoking this.
+    Reject forged oversized N handles before the numeric WASM ABI can narrow. *)
+sign_slot (imported : slot_identity) (digest : kbytes) : slot_result slot_signature :=
+  finish_slot_public (match imported with
+  | SlotIdentity (KeySlotHandle handle) (PublicIdentity _ pub _ _) =>
+    if negb (slot_handle_valid handle) then SlotError SlotStaleHandle else
+    if negb (len_is digest 32) then SlotError (SlotBridgeError BadLength) else
+    if negb (octets_valid digest) then SlotError (SlotBridgeError BadByte) else
+    sign_slot_staged handle pub digest
+  end).
+lock_key_slot (token : unit) : slot_result unit := slot_status (slot_lock 0).

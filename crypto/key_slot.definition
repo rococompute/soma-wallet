@@ -1,0 +1,18 @@
+(** Internal volatile key custody, not approval. Codes 1..9 match the signer
+    primitive; 10 stale/missing handle, 11 generation exhausted. Readers use
+    256 no output / 257 index. slot_handle returns only a public 16-bit handle.
+    No retained/staged secret byte readers. Serialize every call at runtime. *)
+slot_begin_import : N -> N.
+slot_key_byte : N -> N -> N.
+slot_commit_import : N -> N.
+slot_handle : N -> N.
+slot_begin_digest : N -> N -> N.
+slot_digest_byte : N -> N -> N.
+slot_sign : N -> N.
+slot_public_byte : N -> N.
+slot_der_byte : N -> N.
+slot_der_size : N -> N.
+slot_clear_transient : N -> N.
+slot_lock : N -> N.
+slot_inputs_cleared : N -> N.
+slot_locked : N -> N.

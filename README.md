@@ -266,8 +266,9 @@ insertion and Base64, never to claim a valid signature for the transaction.
 Independent Python recomputes the BIP 143 digest and candidate framing. Pure
 checks cover content substitution, consumed approval, ownership/policy failures,
 index and duplicate rejection, DER shape and byte bounds. The runtime operation described below now produces bridge-verified PSBT
-signatures and completes Signed in a booted fixture. Retained secret handles,
-UI sign/export wiring, multi-input batches and finalization remain unavailable.
+signatures and completes Signed in a booted fixture. The separate retained-key
+slot is described below. UI sign/export wiring, multi-input batches and
+finalization remain unavailable.
 Nothing is broadcast.
 
 ## PSBT v0 parsing and BIP 143 digest
@@ -488,8 +489,9 @@ fixtures from `tests/keys.soma` (independently checked by `test_keys.py`). The
 booted image selects the fixture at runtime, checks both network addresses,
 checks empty bridge inputs/outputs, and stages prior input before testing mainnet,
 length, checksum and scalar rejection cleanup. No WIF or scalar is printed.
-Retained key handles, secret-memory lifecycle, secure key entry, session/UI
-integration and persistence remain unavailable. The signer-side PSBT operation
+Authoritative key/session ownership, secure key entry, session/UI integration
+and persistence remain unavailable. A separate retained-slot adapter is described
+below. The signer-side PSBT operation
 below adds no browser or HTTP key/signing endpoint.
 
 
@@ -517,8 +519,8 @@ values. A dishonest/no-op callback cannot enforce this ownership contract.
 
 This is an operation foundation, not the authoritative session/key store. WIF
 must enter inside the signer only. WASM cleanup cannot erase immutable WIF/scalar
-copies in the runtime. Retained key handles, erase-on-lock, multi-input signing,
-HTTP/UI import/approve/sign/export wiring and encrypted persistence remain
+copies in the runtime. Handle-based PSBT composition, authoritative erase-on-lock,
+multi-input signing, HTTP/UI import/approve/sign/export wiring and encrypted persistence remain
 unavailable. The served sign button remains disabled; nothing is broadcast.
 
 New `tests/sign_driver_fixture.json` contains an offline synthetic regtest
@@ -540,3 +542,64 @@ check independently parses maps/transaction/funding, recomputes ownership/digest
 outputs/fee, checks only the partial signature was added and verifies DER with
 Node/OpenSSL plus low-S and altered-signature/digest negatives. It checks WIF and
 scalar hex are absent from logs. These checks run under `./scripts/check`.
+
+
+## Retained signer-local test-key slot
+
+`crypto/key_slot.c` adds one volatile key slot in a separate import-free WASM
+module built from the same pinned libsecp256k1. The existing `crypto/signer.c`
+module and all its APIs remain unchanged. `wallet_key_slot.soma` provides typed
+runtime testnet/regtest WIF import, public identity, handle-based signature and
+explicit lock operations. These are signer-internal primitives, not a session
+owner, approval capability, browser endpoint or persistence mechanism. Use only
+the documented public test keys in this development build.
+
+`import_slot_wif` locks/invalidates the old slot before bounded WIF decoding. A
+successful import validates the scalar with libsecp256k1, derives its compressed
+public key, stores the scalar inside WASM and returns only `SlotIdentity` (a
+numeric generation handle plus public network/key/hash/address). A failed WIF,
+malformed scalar, incomplete import or invalid replacement cannot leave an older
+key usable. The bridge has no retained or staged private-key byte reader.
+
+Every bridge import attempt reserves a new generation in 1..65535, including
+failed attempts. Import/replacement invalidates earlier handles immediately.
+Lock wipes the retained scalar, transient key/digest staging, workspace and all
+public outputs; it does not reset the generation counter. After generation
+65535, further import attempts erase the slot and fail permanently for that WASM
+instance. No generation wraps or is reused. Handles are internal identities,
+not secrets or consent; they are valid only within their original running
+instance and must all be abandoned on restart. The adapter rejects oversized
+binary N handles before the numeric WASM ABI could narrow them into valid ones.
+
+`sign_slot` takes that identity and an exact 32-byte digest, stages no key, and
+signs inside WASM using the retained scalar. It returns public key/DER only after
+libsecp256k1 verifies the signature against that digest. The Soma adapter checks
+the returned public key against the imported identity and clears transient inputs
+and public outputs before returning. Each digest staging is consumed; the key is
+retained until explicit `lock_key_slot`, replacement or a fatal crypto/import
+error. Invalid/stale handles produce no signature and clear staging/output.
+Neither successful key custody nor a valid handle authorizes a transaction: a
+future authoritative session driver must still validate ownership and exact PSBT
+content, obtain fresh review approval and save its consumed state before crypto.
+
+The legacy `clear_key_bridge` clears the legacy bridge; it does not lock this
+separate retained slot. The future owner must call `lock_key_slot` on its lock and
+reset events. These events are not wired to the served page or session model yet.
+WASM erasure also cannot erase immutable WIF/scalar copies in Soma/OCaml; this
+patch makes no stronger secret-memory lifecycle claim. `sign_reviewed_wif` still
+uses the earlier per-call WIF path. Handle-based PSBT composition, authoritative
+session ownership, UI signing, secure key entry and persistence remain unavailable.
+
+New `tests/key-slot-check.mjs` verifies public scalar-one/two identities and DER
+signatures with independent Node/OpenSSL, including changed-message/signature and
+low-S checks. It exercises key replacement, lock, stale/missing handles, invalid
+scalars, malformed/incomplete imports and digest staging. It exhausts the actual
+65535-generation space without a test-only counter setter and proves lock cannot
+reset it. Boolean bridge audits check staging/workspace clearing and lock erasure
+of the retained scalar/output, without returning secret bytes.
+`tests/key_slot_runtime.soma` and `test_key_slot_runtime.py` import a public WIF
+selected at runtime, sign via its handle, verify the exported DER independently,
+check the public regtest identity, replacement/lock invalidation, rejected
+mainnet/malformed WIFs, and oversized-handle rejection before ABI narrowing.
+Captured boot logs are checked for WIF/private scalar hex. The new tests run with
+the unchanged legacy tests in `./scripts/check`. Nothing is broadcast or persisted.

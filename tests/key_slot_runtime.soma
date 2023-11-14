@@ -1,0 +1,79 @@
+Import wallet_key_slot wallet_keys wallet_key_runtime crypto.key_slot tests.keys.
+Require Import Sandbox Crypto.
+
+slot_empty_transient (token : unit) : bool :=
+  andb (N.eqb (slot_inputs_cleared 0) 1)
+    (andb (N.eqb (slot_public_byte 0) 256)
+      (andb (N.eqb (slot_der_byte 0) 256) (N.eqb (slot_der_size 0) 256))).
+slot_fully_locked (token : unit) : bool :=
+  andb (N.eqb (slot_locked 0) 1) (andb (N.eqb (slot_handle 0) 0) (slot_empty_transient tt)).
+runtime_digest : kbytes := sha256_of_bytes (bytes_of_string "retained slot runtime fixture").
+
+identity_is_public_one (imported : slot_identity) : bool :=
+  match imported with SlotIdentity (KeySlotHandle handle) (PublicIdentity net pub hash address) =>
+    andb (slot_handle_valid handle) (andb (match net with Regtest => true | _ => false end)
+      (andb (k_bytes_eq pub gen_pub) (andb (k_bytes_eq hash gen_hash) (k_bytes_eq address addr_regtest))))
+  end.
+
+stale (imported : slot_identity) : bool :=
+  match sign_slot imported runtime_digest with
+  | SlotError SlotStaleHandle => slot_empty_transient tt | _ => false end.
+
+check_replacement (wif bad : string) (tag : nat) : bool :=
+  match import_slot_wif Regtest wif with
+  | SlotError _ => false
+  | SlotOk old => match import_slot_wif Regtest bad with
+    | SlotError (SlotKeyError error) =>
+      andb (match error,tag with
+        | WifBadLength,O | MainnetKeyRejected,S O | InvalidScalar,S (S O)
+        | BadChecksum,S (S (S O)) => true | _,_ => false end)
+        (andb (slot_fully_locked tt) (stale old))
+    | _ => false end
+  end.
+
+check_handle_bounds (imported : slot_identity) : bool :=
+  match imported with SlotIdentity (KeySlotHandle h) public_id =>
+    let forged := SlotIdentity (KeySlotHandle (h + 4294967296)%N) public_id in
+    andb (stale forged) (N.eqb (slot_handle 0) h)
+  end.
+
+check_lifecycle (wif : string) (old : slot_identity) : bool :=
+  match import_slot_wif Regtest wif with
+  | SlotError _ => false
+  | SlotOk current =>
+    if andb (identity_is_public_one current) (slot_empty_transient tt) then
+    if andb (match old,current with
+      | SlotIdentity (KeySlotHandle a) _,SlotIdentity (KeySlotHandle b) _ => (a <? b)%N end)
+      (stale old) then
+    if check_handle_bounds current then
+    match lock_key_slot tt with
+    | SlotError _ => false
+    | SlotOk _ => andb (slot_fully_locked tt) (andb (stale old) (stale current))
+    end else false else false else false
+  end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | [selector] =>
+    let wif := if String.eqb selector "public-one" then string_of_bytes wif_testnet else "" in
+    match import_slot_wif Regtest wif with
+    | SlotError _ => exit 1
+    | SlotOk imported =>
+      if andb (identity_is_public_one imported) (slot_empty_transient tt) then
+      match sign_slot imported runtime_digest with
+      | SlotError _ => exit 1
+      | SlotOk (SlotSignature pub der) =>
+        if andb (k_bytes_eq pub gen_pub) (slot_empty_transient tt) then
+        if check_lifecycle wif imported then
+        if check_replacement wif "" 0%nat then
+        if check_replacement wif (string_of_bytes wif_mainnet) 1%nat then
+        if check_replacement wif (string_of_bytes wif_zero_scalar) 2%nat then
+        if check_replacement wif (string_of_bytes wif_bad_checksum) 3%nat then
+          print (String.append "SLOT_PUBLIC=" (hex_of_bytes pub)) ;;
+          print (String.append "SLOT_DER=" (hex_of_bytes der)) ;;
+          print "PASS: runtime slot custody, stale handles, invalid imports and lock"
+        else exit 1 else exit 1 else exit 1 else exit 1 else exit 1 else exit 1
+      end else exit 1
+    end
+  | _ => exit 1 end.

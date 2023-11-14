@@ -14,3 +14,8 @@ zig cc -target wasm32-wasi -mexec-model=reactor -O2 -DUSE_EXTERNAL_DEFAULT_CALLB
 zig cc -target wasm32-wasi -mexec-model=reactor -O2 \
   -I vendor/monocypher crypto/vault.c vendor/monocypher/monocypher.c \
   -Wl,--no-entry -Wl,--strip-all -o crypto/vault.wasm
+zig cc -target wasm32-wasi -mexec-model=reactor -O2 -DUSE_EXTERNAL_DEFAULT_CALLBACKS \
+  -I vendor/secp256k1/include -I vendor/secp256k1/src \
+  crypto/key_slot.c vendor/secp256k1/src/secp256k1.c \
+  vendor/secp256k1/src/precomputed_ecmult.c vendor/secp256k1/src/precomputed_ecmult_gen.c \
+  -Wl,--no-entry -Wl,--strip-all -o crypto/key_slot.wasm
