@@ -1,0 +1,116 @@
+Require Import Sandbox Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+Import wallet_psbt wallet_keys wallet_session wallet_key_runtime crypto.signing.
+Import wallet_sign_runtime wallet_signing_prepare tests.keys tests.sign_driver_fixture.
+
+public_id : public_identity := match identity_of_pubkey Regtest gen_pub with
+  KDone value => value | KFail _ => PublicIdentity Regtest [] [] [] end.
+source : psbt_ref := match reference_for 7%nat fixture_raw with
+  Done value => value | Fail _ => ParsedPsbtRef 7%nat "invalid" end.
+loaded : session := PsbtLoaded (KeyRef 9%nat) source.
+approved : session := match approve loaded source with Ok next => next | Err _ => Locked end.
+reloaded : session := match load_psbt approved source with Ok next => next | Err _ => Locked end.
+consumed : session := match sign_request approved with Ok next => next | Err _ => Locked end.
+other_raw : bytes := firstn (Nat.sub (List.length fixture_raw) 2) fixture_raw ++ [222,0].
+(** Public scalar-two negative WIF, never a real wallet key. *)
+wrong_wif : string := "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87K7XCyj5v".
+bridge_empty (token : unit) : bool :=
+  if inputs_cleared 0 then
+    match read_public_byte 0, read_compact_byte 0, read_der_byte 0 with
+    | ByteFailure NoOutput, ByteFailure NoOutput, ByteFailure NoOutput => true
+    | _, _, _ => false end
+  else false.
+dirty_bridge (token : unit) : bool :=
+  match begin_inputs 32 32 with
+  | BridgeFailure _ => false
+  | BridgeOk => match put_key_byte 31 1 with
+    | BridgeOk => negb (inputs_cleared 0) | _ => false end
+  end.
+
+(** Instrumented test hook, not a production store. It observes dirty staging
+    before adapter cleanup and records that a source-bound Signing was offered.
+    Production owners must actually save that state before returning true. *)
+record_pending (pending : session) : io bool :=
+  match pending with
+  | Signing (SignPermission _ bound) =>
+    if andb (same_psbt source bound) (negb (inputs_cleared 0)) then
+      print "PENDING_HOOK_BEFORE_BRIDGE" ;; ret true
+    else ret false
+  | _ => ret false end.
+unexpected_hook (pending : session) : io bool := exit 42.
+failed_store (pending : session) : io bool := ret false.
+
+failure_consumed (state : session) (wif : string) : io bool :=
+  result <- sign_reviewed_wif unexpected_hook state fixture_raw public_id 0%nat wif ;;
+  ret (match result with
+  | RuntimeRejected _ (RuntimePreparationError (SigningSessionError ApprovalConsumed)) => bridge_empty tt
+  | _ => false end).
+
+negative (state : session) (raw : bytes) (wif : string) (tag : nat) : io bool :=
+  if dirty_bridge tt then
+    let hook := match tag with O | S O => unexpected_hook | _ => record_pending end in
+    result <- sign_reviewed_wif hook state raw public_id 0%nat wif ;;
+    match result with
+    | RuntimeSigned _ _ _ => ret false
+    | RuntimeRejected next error =>
+      if andb (match error, tag with
+        | RuntimePreparationError (SigningSessionError NotApproved), O => true
+        | RuntimePreparationError (SigningSessionError ApprovalConsumed), S O => true
+        | RuntimeKeyMismatch, S (S O) => true
+        | RuntimePreparationError (SigningSessionError ApprovalForDifferentPsbt), S (S (S O)) => true
+        | RuntimeKeyError (KeyFormatError WifBadLength), S (S (S (S O))) => true
+        | _, _ => false end) (bridge_empty tt) then
+      match tag with S (S _) => failure_consumed next wif | _ => ret true end
+      else ret false
+    end
+  else ret false.
+
+check_store_failure (wif : string) : io bool :=
+  if dirty_bridge tt then
+    result <- sign_reviewed_wif failed_store approved fixture_raw public_id 0%nat wif ;;
+    match result with
+    | RuntimeRejected next RuntimePendingStoreFailed =>
+      if bridge_empty tt then failure_consumed next wif else ret false
+    | _ => ret false end
+  else ret false.
+
+export_roundtrip (raw : bytes) : bool :=
+  match parse_psbt raw with Fail _ => false | Done p => bytes_eqb (serialize_psbt p) raw end.
+
+check_success (wif : string) : io unit :=
+  if dirty_bridge tt then
+    result <- sign_reviewed_wif record_pending approved fixture_raw public_id 0%nat wif ;;
+    match result with
+    | RuntimeRejected _ _ => exit 1
+    | RuntimeSigned next raw text =>
+      if andb (match next with
+        | Signed (SignedPsbtRef _ bound) => same_psbt source bound
+        | _ => false end) (andb (bridge_empty tt) (export_roundtrip raw)) then
+      second <- sign_reviewed_wif unexpected_hook next fixture_raw public_id 0%nat wif ;;
+      match second with
+      | RuntimeRejected _ (RuntimePreparationError (SigningSessionError AlreadySigned)) =>
+        if bridge_empty tt then
+          print (String.append "SIGNED_PSBT_HEX=" (hex_of_bytes raw)) ;;
+          print (String.append "SIGNED_PSBT_BASE64=" text) ;;
+          print "PASS: pending hook, runtime PSBT signing, approval and cleanup"
+        else exit 1
+      | _ => exit 1 end
+      else exit 1
+    end
+  else exit 1.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | [selector] =>
+    let wif := if String.eqb selector "public-one" then string_of_bytes wif_testnet else "" in
+    a <- negative loaded fixture_raw wif 0%nat ;; if a then
+    b <- negative reloaded fixture_raw wif 0%nat ;; if b then
+    c <- negative consumed fixture_raw wif 1%nat ;; if c then
+    d <- negative approved fixture_raw wrong_wif 2%nat ;; if d then
+    e <- negative approved other_raw wif 3%nat ;; if e then
+    f <- negative approved fixture_raw "" 4%nat ;; if f then
+    g <- check_store_failure wif ;; if g then check_success wif
+    else exit 1 else exit 1 else exit 1 else exit 1 else exit 1 else exit 1 else exit 1
+  | _ => exit 1 end.

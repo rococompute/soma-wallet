@@ -1,0 +1,4 @@
+(** Public offline synthetic regtest fixture; provenance in sign_driver_fixture.json. *)
+Import wallet_psbt.
+Require Import Crypto.
+fixture_raw : bytes := match bytes_of_hex "70736274ff01005202000000012a49310e9e5aa3cbdf200eaa42c6a1910a1e208541b367ca75c979bac4ef58a20000000000fdffffff01b88201000000000016001406afd46bcdfd22ef94ac122aa11f241244a37ecc0000000002fc0102aabb0001011fa086010000000000160014751e76e8199196d454941c45d1b3a323f1433bd602fc0201cc0002fc0301dd00" with Some raw => raw | None => [] end.

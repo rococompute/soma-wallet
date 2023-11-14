@@ -157,9 +157,10 @@ New tests use a synthetic public r=1,s=1 DER value solely to check exact byte
 insertion and Base64, never to claim a valid signature for the transaction.
 Independent Python recomputes the BIP 143 digest and candidate framing. Pure
 checks cover content substitution, consumed approval, ownership/policy failures,
-index and duplicate rejection, DER shape and byte bounds. Runtime PSBT signing,
-verified result completion, retained secret handles, UI sign/export wiring,
-multi-input batches and finalization remain unavailable. Nothing is broadcast.
+index and duplicate rejection, DER shape and byte bounds. The runtime operation described below now produces bridge-verified PSBT
+signatures and completes Signed in a booted fixture. Retained secret handles,
+UI sign/export wiring, multi-input batches and finalization remain unavailable.
+Nothing is broadcast.
 
 ## PSBT v0 parsing and BIP 143 digest
 
@@ -341,8 +342,9 @@ copies held by its caller or provide a vault, entropy source, or blinded context
 bitcoinjs RFC6979 vectors, independent Node/OpenSSL signature verification,
 malformed inputs and clearing. `tests/runtime_signer.soma` and its Python boot
 check exercise the typed bridge with a public fixture chosen at runtime.
-This primitive is not connected to PSBT parsing, transaction approval, or the UI;
-wallet signing and signed-PSBT export remain unavailable.
+The operation described below now connects this primitive to PSBT preparation
+and approval for one selected input. UI signing and signed-PSBT export remain
+unavailable.
 
 ## Dependency provenance
 
@@ -379,4 +381,54 @@ booted image selects the fixture at runtime, checks both network addresses,
 checks empty bridge inputs/outputs, and stages prior input before testing mainnet,
 length, checksum and scalar rejection cleanup. No WIF or scalar is printed.
 Retained key handles, secret-memory lifecycle, secure key entry, session/UI
-integration, PSBT signing and persistence remain unavailable.
+integration and persistence remain unavailable. The signer-side PSBT operation
+below adds no browser or HTTP key/signing endpoint.
+
+
+## Approved signing operation with pending-state hook
+
+`wallet_sign_runtime.soma` now connects exact-content PSBT preparation, fresh
+approval, runtime testnet/regtest WIF validation and key matching to bridge
+signing and public signed-PSBT export for one native P2WPKH SIGHASH_ALL input.
+The bridge verifies each produced signature with libsecp256k1. The adapter
+re-reads and compares its compressed public key after signing, bounds/reads DER,
+inserts the partial signature, re-parses the PSBT and completes Signed with a
+reference bound to the original reviewed PSBT. Only public bytes/Base64 and the
+next state are returned; errors contain no signed output, WIF or decoded key.
+Bridge inputs and public outputs are cleared on success and every error.
+
+`sign_reviewed_wif` is an IO operation taking a trusted `store_pending` callback.
+After the pure approval check, it invokes this callback with the consumed-consent
+Signing state **before any key/bridge IO, including cleanup**. The callback must
+install that state in its single authoritative owner and return true only after
+saving it. False prevents signing and returns a typed error with bridge cleanup.
+Authorized validation failures return Signing, so the returned state refuses a
+retry without a new load/review/approval. The caller must install final states on
+success and failure, serialize events and never replay old immutable Approved
+values. A dishonest/no-op callback cannot enforce this ownership contract.
+
+This is an operation foundation, not the authoritative session/key store. WIF
+must enter inside the signer only. WASM cleanup cannot erase immutable WIF/scalar
+copies in the runtime. Retained key handles, erase-on-lock, multi-input signing,
+HTTP/UI import/approve/sign/export wiring and encrypted persistence remain
+unavailable. The served sign button remains disabled; nothing is broadcast.
+
+New `tests/sign_driver_fixture.json` contains an offline synthetic regtest
+transaction: public scalar one owns a 100000-sat P2WPKH funding output and scalar
+two's destination receives 99000 sat (1000-sat fee). The included funding
+transaction is synthetic, not mined; its hash matches the signed outpoint.
+Unknown PSBT entries check preservation. No network or real funds are involved.
+The scalar-one WIF comes from `tests/keys.soma`; the wrong scalar-two WIF is also
+public test data. Framing and digest follow BIP 174 and BIP 143.
+
+`tests/runtime_sign_driver.soma` records the offered Signing state in an
+instrumented hook while prior bridge staging is still dirty, proving callback
+ordering. This test recorder is not a production state store. The boot checks
+missing/reloaded/consumed approval, failed state storage, wrong key, substituted
+metadata and malformed WIF, with no output and empty staging/output on rejection;
+authorized failures and completed signatures cannot be signed a second time.
+The exported PSBT parses and serializes to identical bytes. The new Python boot
+check independently parses maps/transaction/funding, recomputes ownership/digest,
+outputs/fee, checks only the partial signature was added and verifies DER with
+Node/OpenSSL plus low-S and altered-signature/digest negatives. It checks WIF and
+scalar hex are absent from logs. These checks run under `./scripts/check`.

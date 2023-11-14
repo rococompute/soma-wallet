@@ -1,0 +1,113 @@
+(** Signer-local serialized operation. This is not a session/key store. The
+    trusted caller owns one state, installs pending BEFORE IO via the hook,
+    installs every final state, and never replays immutable prior states. *)
+Import wallet_psbt wallet_keys wallet_session wallet_signing_prepare.
+Import wallet_partial_export wallet_key_runtime crypto.signing crypto.signer.
+Require Import Sandbox Crypto.
+
+Inductive sign_runtime_error :=
+| RuntimePreparationError (error : signing_prepare_error)
+| RuntimeKeyError (error : key_runtime_error)
+| RuntimeBridgeError (error : bridge_error)
+| RuntimeKeyMismatch | RuntimeDerLength | RuntimePendingStoreFailed
+| RuntimeExportError (error : partial_export_error)
+| RuntimeCompletionError (error : session_error).
+Inductive sign_runtime_result :=
+| RuntimeSigned (next : session) (serialized : bytes) (base64_text : string)
+| RuntimeRejected (next : session) (error : sign_runtime_error).
+runtime_next (result : sign_runtime_result) : session :=
+  match result with RuntimeSigned next _ _ | RuntimeRejected next _ => next end.
+
+finish_sign_runtime (result : sign_runtime_result) : sign_runtime_result :=
+  match result with
+  | RuntimeSigned next raw text => match clear_inputs 0 with
+    | BridgeOk => RuntimeSigned next raw text
+    | BridgeFailure e => RuntimeRejected next (RuntimeBridgeError e) end
+  | RuntimeRejected next error => match clear_inputs 0 with
+    | BridgeOk => RuntimeRejected next error
+    | BridgeFailure e => RuntimeRejected next (RuntimeBridgeError e) end
+  end.
+Fixpoint read_runtime_der (remaining : nat) (index : N) : key_runtime_result bytes :=
+  match remaining with
+  | O => RuntimeOk []
+  | S more => match read_der_byte index with
+    | ByteFailure e => RuntimeError (CryptoBridgeError e)
+    | PublicByte b => match read_runtime_der more (index + 1)%N with
+      | RuntimeError e => RuntimeError e
+      | RuntimeOk rest => RuntimeOk (public_byte b :: rest) end
+    end
+  end.
+
+(** BridgeOk requires libsecp256k1 verification against the staged digest and
+    derived key. Re-read that public key before accepting any DER output. *)
+sign_prepared_key (pending : session) (raw : bytes) (public_id : public_identity)
+    (index : nat) (key digest : bytes) : sign_runtime_result :=
+  match sign_runtime (map runtime_byte key) (map runtime_byte digest) with
+  | BridgeFailure e => RuntimeRejected pending (RuntimeBridgeError e)
+  | BridgeOk => match read_derived_public 33 0 with
+    | RuntimeError e => RuntimeRejected pending (RuntimeKeyError e)
+    | RuntimeOk pub => match public_id with PublicIdentity _ expected _ _ =>
+      if negb (k_bytes_eq pub expected) then RuntimeRejected pending RuntimeKeyMismatch else
+      let size := bridge_der_size 0 in
+      if negb (andb (8 <=? size)%N (size <=? 72)%N)
+      then RuntimeRejected pending RuntimeDerLength else
+      match read_runtime_der (N.to_nat size) 0 with
+      | RuntimeError e => RuntimeRejected pending (RuntimeKeyError e)
+      | RuntimeOk der => match insert_partial_candidate raw public_id index der with
+        | CandidateRejected e => RuntimeRejected pending (RuntimeExportError e)
+        | Candidate (PartialCandidate serialized text) => match pending with
+          | Signing (SignPermission _ source) =>
+            match complete_sign pending (SignedPsbtRef 0 source) with
+            | Err e => RuntimeRejected pending (RuntimeCompletionError e)
+            | Ok next => RuntimeSigned next serialized text end
+          | _ => RuntimeRejected pending (RuntimeCompletionError SignNotRequested)
+          end
+        end
+      end
+      end
+    end
+  end.
+use_runtime_wif (pending : session) (raw : bytes) (public_id : public_identity)
+    (index : nat) (digest : bytes) (wif : string) : sign_runtime_result :=
+  match decode_runtime_wif wif with
+  | KFail e => RuntimeRejected pending (RuntimeKeyError (KeyFormatError e))
+  | KDone key => match public_id with PublicIdentity net expected _ _ =>
+    match derive_decoded_identity net key with
+    | RuntimeError e => RuntimeRejected pending (RuntimeKeyError e)
+    | RuntimeOk (PublicIdentity _ actual _ _) =>
+      if k_bytes_eq actual expected
+      then sign_prepared_key pending raw public_id index key digest
+      else RuntimeRejected pending RuntimeKeyMismatch
+    end
+    end
+  end.
+
+(** Internal continuation, invoked only after the caller has saved pending. *)
+sign_after_pending (state pending : session) (raw : bytes) (public_id : public_identity)
+    (index : nat) (wif : string) : sign_runtime_result :=
+  match clear_inputs 0 with
+  | BridgeFailure e => RuntimeRejected pending (RuntimeBridgeError e)
+  | BridgeOk => finish_sign_runtime (
+    match prepare_signing state raw public_id index with
+    | PreparationFailed e => RuntimeRejected pending (RuntimePreparationError e)
+    | Prepared (SigningPreparation _ _ _ _ digest) =>
+      use_runtime_wif pending raw public_id index digest wif
+    end)
+  end.
+
+(** store_pending must install pending in ONE authoritative state and return
+    true only after doing so. It runs before ANY key/bridge IO, even cleanup.
+    A false result cannot sign. All exits clear bridge inputs/public outputs.
+    Call only with runtime WIF; no key bytes or WIF are returned or printed.
+    This hook contract is trusted; it cannot prevent dishonest/replayed callers. *)
+sign_reviewed_wif (store_pending : session -> io bool)
+    (state : session) (raw : bytes) (public_id : public_identity)
+    (index : nat) (wif : string) : io sign_runtime_result :=
+  match sign_request state with
+  | Err e => ret (finish_sign_runtime
+      (RuntimeRejected state (RuntimePreparationError (SigningSessionError e))))
+  | Ok pending =>
+    saved <- store_pending pending ;;
+    if saved then ret (sign_after_pending state pending raw public_id index wif)
+    else ret (finish_sign_runtime (RuntimeRejected pending RuntimePendingStoreFailed))
+  end.
