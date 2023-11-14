@@ -260,28 +260,90 @@ rather than silently weakening SWVP v1. Until then nothing seals real keys:
 `vault_seal` still fails closed, salt/nonce are not generated from entropy, and
 key-slot integration, persistence and UI unlock remain unavailable.
 
-## Session policy model
+## Session policy model and assurance audit
 
-`wallet_session.soma` is a pure, typed state machine, separate from the served page.
-It moves through Locked, KeyImported, PsbtLoaded, Approved, Signing (a pending
-permission with approval consumed), and Signed. It holds opaque numeric key
-handles and parsed/signed PSBT references only. The PSBT reference binds a parser
-handle and an exact-content digest; their production and validation belong to
-the future trusted parser/key-store integration. No key bytes are represented.
+The first plan item's session policy is already implemented and checked; this
+completion audit required **no behavior change**. `wallet_session.soma` is a
+pure state machine with `Locked`, `KeyImported`, `PsbtLoaded`, `Approved`,
+`Signing` and `Signed` states. It contains references, consent and pending
+permissions, with no private-key bytes, parser, IO or cryptographic operation.
+The following evidence concerns the actual transition functions, not an assumed
+invariant on values supplied by callers.
 
-A review event approves the exact PSBT reference. Loading a PSBT (even the same
-one) or importing a key discards prior approval; requesting signing consumes it.
-Completion accepts an external signed-result reference for the pending PSBT.
-Lock/reset drops every reference and permission. `wallet_session.exp` proves general
-policy properties, and `tests/session.soma` checks the happy path and rejected
-transitions with proof-checked equalities in `./scripts/check`.
+General proofs below are in `wallet_session.exp`. Concrete transition chains
+and negative expectations are in `tests/session.soma` / `tests/session.exp`.
+Soma reads each paired `.exp` after its program and checks its proofs before
+accepting the build; these are build-failing equalities, not expected log text.
 
-This is a state machine only: key import, parsing, cryptographic signing and
-export remain unavailable in the UI. `complete_sign` neither creates nor verifies
-signatures. A future IO driver must own one authoritative session, replace it
-with each successful result, serialize events, and never reuse old immutable
-states or accept model constructors from clients. It must release/erase key-store
-material on lock; dropping a handle alone is not secret-memory erasure.
+| Policy clause | Implemented behavior | Existing checked evidence |
+| --- | --- | --- |
+| Signing requires a key, loaded PSBT and approval | `sign_request` returns `NoKey` for `Locked`, `NoPsbt` for `KeyImported`, and `NotApproved` for `PsbtLoaded`. Success can only come from `Approved`. | General `permission_requires_approval`; concrete `missing_prerequisites` and `happy_path`. |
+| Approval names the exact review | `same_psbt` compares both numeric handle and digest string. Both `approve` and `sign_request` require a match, including when a caller constructs inconsistent consent. | General `approval_must_match`; `different_approval_is_rejected` changes the handle, digest, and whole reference separately. |
+| Approval is consumed before signing work | Success returns `Signing (SignPermission key transaction)`, carrying no approval. Further sign/approve calls in that state return `ApprovalConsumed`; signing an already `Signed` state returns `AlreadySigned`. | General `request_consumes` and `signed_cannot_sign`; `approval_is_one_shot`. |
+| Load and key replacement invalidate approval | Every permitted `load_psbt`, including an identical reload, returns `PsbtLoaded`. `import_key` always returns a fresh `KeyImported`, even for the same handle. A load/import can also replace pending work. | General `load_invalidates` and `import_invalidates`; `load_and_import_require_new_approval` and `stale_completion_cannot_finish_replaced_session`. |
+| Completion belongs to the pending request | `complete_sign` accepts only `Signing` and a signed-result reference whose source matches its pending PSBT. An approved state cannot skip the request step. `Signed` has no model-active key. | `approval_is_one_shot` covers premature completion, mismatched source and repeated completion; `signed_has_no_active_key`. |
+| Lock/reset drop key references and consent | `lock` returns `Locked` for every state; `reset` delegates to it. `Locked` contains no key, PSBT, approval, output or pending permission. | General `lock_clears`, `lock_has_no_key`, `reset_clears` and `locked_cannot_sign`; `lock_each_state` also checks completion refusal across every constructor. |
+
+### Where reference validity and runtime ownership come from
+
+`KeyRef` and `ParsedPsbtRef` are public, constructible model values. Their names
+do not prove that a key exists or that parsing/review happened. Likewise,
+`complete_sign` checks references and never creates or verifies a signature.
+`reference_for` in `wallet_signing_prepare.soma` first parses bounded PSBT bytes,
+then binds their SHA256 digest, including metadata and unknown entries.
+`prepare_signing` re-parses, checks that content digest, input ownership and
+supported policy, and constructs the BIP143 digest. This content binding depends
+on SHA256's security; the model proves equality checks, not hash collision
+resistance. `tests/signing_prepare.exp` covers missing prerequisites, substituted
+content, mismatched consent, consumed approval and ownership failures, with
+`preparation_requires_approved_state` as a general prerequisite theorem.
+
+The authoritative `wallet_sign_owner.soma` supplies the runtime discipline.
+`OwnerImport` validates a signer-side regtest WIF through the retained slot;
+`OwnerLoad` parses and stores the bytes/reference, discarding approval/export
+even on malformed or identical loads. `OwnerSign` accepts only an input index,
+checks slot identity binding and installs the consumed pending state in
+`Sandbox.iterate` before `owner_finish` calls `sign_slot`. Pending work completes
+before another command is polled. Verified slot output is inserted into the
+PSBT before source-bound completion and export. In the pure model `Signed`
+refuses `load_psbt`; the owner deliberately starts a fresh `KeyImported` review
+from its separately retained identity, requiring a new approval.
+`OwnerLock`/`OwnerReset` use `owner_erase`, erase the slot and both vault domains,
+and return `owner_empty`. Dropping the pure model reference alone does not wipe
+memory.
+
+`tests/runtime_sign_owner.soma` / `tests/test_runtime_sign_owner.py` exercise the
+actual loop's pending-before-key-IO ordering, malformed/identical reloads,
+replacement, consumed consent, lock/reset and export invalidation. They also
+independently verify the public fixture signature and PSBT. The owner-vault
+runtime tests additionally check stale handles, empty owner references and
+dual-domain erasure after lock/reset and failed unlocks. These are executable
+runtime regressions, not a general proof of the entire application.
+
+### Assurance limits and reproduction
+
+Immutable old `Approved` states and permissions can be copied and replayed by
+trusted code that ignores returned states. Model constructors are not linear
+capabilities or an authentication boundary. Run exactly one authoritative owner
+per slot, route operations through it, and do not expose constructors or permit
+concurrent direct slot calls. The callbacks/transport must supply genuine review
+and consent events: model checks and public UI revisions do not establish human
+intent, authentication or protection against browser-forged requests. WASM
+wiping cannot erase immutable caller/runtime copies.
+
+Run the complete check from this exact checkout with the market-selected CLI:
+
+```sh
+SOMA=/absolute/path/to/soma ./scripts/check
+```
+
+The fixed check builds/checks the paired model and test expectations, then boots
+the owner regressions and runs the independent host checks. No model-policy gap
+was found for the first plan line within these stated limits. Secure key entry,
+UI request authentication/browser verification, successful vault unlock,
+production KDF/entropy, encrypted persistence and multi-input orchestration are
+separate work. The leader decides plan completion; this audit does not mark
+`.plan` or claim those features are available.
 
 ## Pure signing preparation and candidate export
 
