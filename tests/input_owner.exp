@@ -1,0 +1,14 @@
+Example owned_native : check_map [utxo owned_script] = InputOwnerChecked Owned := eq_refl.
+Example other_native : check_map [utxo other_script] = InputOwnerChecked NotOwned := eq_refl.
+Example explicit_all : check_map [utxo owned_script, Entry [3] [1,0,0,0]] = InputOwnerChecked Owned := eq_refl.
+Example no_utxo : check_map [] = InputOwnerError (InputPolicyError MissingWitnessUtxo) := eq_refl.
+Example non_all : check_map [utxo owned_script, Entry [3] [2,0,0,0]] = InputOwnerError (InputPolicyError UnsupportedSighash) := eq_refl.
+Example malformed_sighash : check_map [utxo owned_script, Entry [3] [1]] = InputOwnerError (InputPolicyError UnsupportedSighash) := eq_refl.
+Example non_witness : check_map [utxo owned_script, Entry [0] []] = InputOwnerError (InputPolicyError UnsupportedNonWitnessUtxo) := eq_refl.
+Example redeem : check_map [utxo owned_script, Entry [4] []] = InputOwnerError (InputPolicyError UnsupportedRedeemScript) := eq_refl.
+Example witness : check_map [utxo owned_script, Entry [5] []] = InputOwnerError (InputPolicyError UnsupportedWitnessScript) := eq_refl.
+Example unsupported_script : check_map [utxo [81]] = InputOwnerError (IdentityPolicyError wallet_keys.UnsupportedScript) := eq_refl.
+Example malformed_utxo : check_map [Entry [1] [1]] = InputOwnerError (InputPolicyError Truncated) := eq_refl.
+Example index_range : check_psbt_input_owner id (Psbt [] unsigned [[utxo owned_script]] [[]]) 1%nat = InputOwnerError (InputPolicyError InputIndexOutOfRange) := eq_refl.
+Example forged_identity : check_psbt_input_owner (PublicIdentity Testnet pub [] []) (Psbt [] unsigned [[utxo owned_script]] [[]]) 0%nat = InputOwnerError InconsistentPublicIdentity := eq_refl.
+Example invalid_octet : check_input_map_owner id [Entry [1] [300]] = InputOwnerError (InputPolicyError ByteOutOfRange) := eq_refl.

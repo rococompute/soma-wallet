@@ -1,0 +1,3 @@
+Example bounded_short : wif_character_count 52%nat "" = false := eq_refl.
+Example bounded_zero : wif_character_count 0%nat "x" = false := eq_refl.
+Example rejected_before_decode : decode_runtime_wif "" = KFail WifBadLength := eq_refl.

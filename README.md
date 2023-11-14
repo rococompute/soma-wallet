@@ -186,3 +186,30 @@ WASM without host imports and called through Soma's existing `.definition` API.
 BIP 143 and BIP 174 are the protocol references for the planned transaction work.
 
 This is a development experiment, not an audited or production-ready wallet.
+
+## Runtime public-identity and input-ownership adapters
+
+`wallet_key_runtime.soma` connects bounded compressed testnet WIF validation to
+libsecp256k1 inside the signer. `preview_wif_identity` returns only the network,
+compressed public key, HASH160 and tb1/bcrt1 address, or typed key/bridge errors.
+It clears previous staging before decoding and clears inputs and public outputs
+after success and failure, including malformed WIF. `clear_key_bridge` is the
+explicit bridge lock cleanup. Call this effectful single-operation bridge only
+from a serialized runtime driver, never as a compile-time secret expression.
+Dropping immutable Soma values does not zeroize runtime copies; decoded scalar
+and WIF copies must remain inside the signer and be abandoned after use. This
+adapter does not retain key handles or implement an authoritative session store.
+
+`wallet_input_owner.soma` checks identity consistency, input range, the digest's
+`metadata_ok` and `sighash_all_ok` policy, and then the bounded witness UTXO's
+native P2WPKH program. Unsupported metadata, scripts and sighashes are typed
+rejections. `Owned` is a comparison with a PSBT claim, not UTXO authentication
+or signing permission; fresh session approval is still required.
+
+New ownership proof tests and `tests/key_runtime.soma` exercise public scalar-one
+fixtures from `tests/keys.soma` (independently checked by `test_keys.py`). The
+booted image selects the fixture at runtime, checks both network addresses,
+checks empty bridge inputs/outputs, and stages prior input before testing mainnet,
+length, checksum and scalar rejection cleanup. No WIF or scalar is printed.
+Retained key handles, secret-memory lifecycle, secure key entry, session/UI
+integration, PSBT signing and persistence remain unavailable.

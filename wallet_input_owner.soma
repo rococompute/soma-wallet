@@ -1,0 +1,51 @@
+Import wallet_keys wallet_psbt.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+Inductive input_owner_error := InputPolicyError (error : parse_error)
+  | IdentityPolicyError (error : key_error) | InconsistentPublicIdentity.
+Inductive input_owner_result := InputOwnerChecked (result : ownership)
+  | InputOwnerError (error : input_owner_error).
+
+identity_error (id : public_identity) : option input_owner_error :=
+  match id with PublicIdentity net pub claimed_hash claimed_address =>
+    match identity_of_pubkey net pub with
+    | KFail e => Some (IdentityPolicyError e)
+    | KDone (PublicIdentity _ _ actual_hash actual_address) =>
+      if andb (k_bytes_eq claimed_hash actual_hash) (k_bytes_eq claimed_address actual_address)
+      then None else Some InconsistentPublicIdentity
+    end
+  end.
+
+(** Internal map helper; public entry validates identity and index first. *)
+check_input_map_owner (id : public_identity) (m : psbt_map) : input_owner_result :=
+  match metadata_ok m with
+  | Fail e => InputOwnerError (InputPolicyError e)
+  | Done _ => match sighash_all_ok m with
+    | Fail e => InputOwnerError (InputPolicyError e)
+    | Done _ => match lookup [1] m with
+      | None => InputOwnerError (InputPolicyError MissingWitnessUtxo)
+      | Some raw =>
+        if negb (len_le raw 10011%nat) then InputOwnerError (InputPolicyError InputTooLarge)
+        else if negb (octets_valid raw) then InputOwnerError (InputPolicyError ByteOutOfRange)
+        else match parse_witness_utxo raw with
+        | Fail e => InputOwnerError (InputPolicyError e)
+        | Done (_, script) => match check_ownership id script with
+          | KDone result => InputOwnerChecked result
+          | KFail e => InputOwnerError (IdentityPolicyError e)
+          end
+        end
+      end
+    end
+  end.
+
+check_psbt_input_owner (id : public_identity) (p : psbt) (index : nat) : input_owner_result :=
+  match identity_error id with
+  | Some e => InputOwnerError e
+  | None => match p with Psbt _ (Tx _ ins _ _) maps _ =>
+    match nth_error ins index, nth_error maps index with
+    | Some _, Some m => check_input_map_owner id m
+    | _, _ => InputOwnerError (InputPolicyError InputIndexOutOfRange)
+    end
+    end
+  end.

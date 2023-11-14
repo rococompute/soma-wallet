@@ -1,0 +1,78 @@
+(** Effectful, serialized signer-side adapter. No secret is returned. *)
+Import wallet_keys crypto.signing.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+
+Inductive key_runtime_error := KeyFormatError (error : key_error)
+  | CryptoBridgeError (error : bridge_error) | MissingDerivedPublicKey.
+Inductive key_runtime_result (A : Type) := RuntimeOk (value : A) | RuntimeError (error : key_runtime_error).
+Arguments RuntimeOk {A} value.
+Arguments RuntimeError {A} error.
+
+Fixpoint wif_character_count (remaining : nat) (s : string) : bool :=
+  match remaining, s with
+  | O, String.EmptyString => true
+  | S n, String.String _ rest => wif_character_count n rest
+  | _, _ => false
+  end.
+
+decode_runtime_wif (s : string) : key_outcome kbytes :=
+  if wif_character_count 52 s then decode_wif (bytes_of_string s) else KFail WifBadLength.
+
+runtime_byte (b : int) : N := Ascii.N_of_ascii (Sha256.ascii_of_byte b).
+public_byte (b : N) : int := Sha256.byte_of_ascii (Ascii.ascii_of_N b).
+
+Fixpoint read_derived_public (remaining : nat) (index : N) : key_runtime_result kbytes :=
+  match remaining with
+  | O => RuntimeOk []
+  | S more => match read_public_byte index with
+    | ByteFailure e => RuntimeError (CryptoBridgeError e)
+    | PublicByte b => match read_derived_public more (index + 1)%N with
+      | RuntimeError e => RuntimeError e
+      | RuntimeOk rest => RuntimeOk (public_byte b :: rest)
+      end
+    end
+  end.
+
+(** Match first, then clear, so the effect follows both success and failure. *)
+finish_key_runtime {A : Type} (r : key_runtime_result A) : key_runtime_result A :=
+  match r with
+  | RuntimeOk value => match clear_inputs 0 with
+    | BridgeOk => RuntimeOk value | BridgeFailure e => RuntimeError (CryptoBridgeError e) end
+  | RuntimeError error => match clear_inputs 0 with
+    | BridgeOk => RuntimeError error | BridgeFailure e => RuntimeError (CryptoBridgeError e) end
+  end.
+
+derive_decoded_identity (net : network) (key : kbytes) : key_runtime_result public_identity :=
+  finish_key_runtime (
+    if negb (len_is key 32) then RuntimeError (KeyFormatError WifBadLength)
+    else if negb (octets_valid key) then RuntimeError (KeyFormatError ByteOutOfRange)
+    else match begin_inputs 32 32 with
+    | BridgeFailure e => RuntimeError (CryptoBridgeError e)
+    | BridgeOk => match stage_key 0 (map runtime_byte key) with
+      | BridgeFailure e => RuntimeError (CryptoBridgeError e)
+      | BridgeOk => match derive_public 0 with
+        | BridgeFailure e => RuntimeError (CryptoBridgeError e)
+        | BridgeOk => match read_derived_public 33 0 with
+          | RuntimeError e => RuntimeError e
+          | RuntimeOk pub => match identity_of_pubkey net pub with
+            | KFail e => RuntimeError (KeyFormatError e)
+            | KDone public_id => RuntimeOk public_id
+            end
+          end
+        end
+      end
+    end).
+
+(** Clear BEFORE decoding as well: a malformed WIF must wipe earlier staging. *)
+preview_wif_identity (net : network) (text : string) : key_runtime_result public_identity :=
+  match clear_inputs 0 with
+  | BridgeFailure e => RuntimeError (CryptoBridgeError e)
+  | BridgeOk => finish_key_runtime (match decode_runtime_wif text with
+    | KFail e => RuntimeError (KeyFormatError e)
+    | KDone key => derive_decoded_identity net key
+    end)
+  end.
+
+clear_key_bridge (token : unit) : key_runtime_result unit :=
+  match clear_inputs 0 with BridgeOk => RuntimeOk tt | BridgeFailure e => RuntimeError (CryptoBridgeError e) end.

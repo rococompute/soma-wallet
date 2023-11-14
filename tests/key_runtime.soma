@@ -1,0 +1,55 @@
+Require Import Sandbox Crypto.
+Import wallet_keys crypto.signing wallet_key_runtime tests.keys.
+
+bridge_empty (token : unit) : bool :=
+  if inputs_cleared 0 then
+    match read_public_byte 0, read_compact_byte 0, read_der_byte 0 with
+    | ByteFailure NoOutput, ByteFailure NoOutput, ByteFailure NoOutput => true
+    | _, _, _ => false
+    end
+  else false.
+
+check_identity (net : network) (wif : string) (expected_address : kbytes) : bool :=
+  match preview_wif_identity net wif with
+  | RuntimeError _ => false
+  | RuntimeOk (PublicIdentity actual_net pub hash address) =>
+    andb (match net, actual_net with Testnet, Testnet | Regtest, Regtest => true | _, _ => false end)
+      (andb (k_bytes_eq pub gen_pub) (andb (k_bytes_eq hash gen_hash)
+        (andb (k_bytes_eq address expected_address) (bridge_empty tt))))
+  end.
+
+check_failure (wif : string) (expected : key_error) : bool :=
+  match begin_inputs 32 32 with
+  | BridgeFailure _ => false
+  | BridgeOk => match put_key_byte 31 1 with
+    | BridgeFailure _ => false
+    | BridgeOk => if inputs_cleared 0 then false else
+      match preview_wif_identity Testnet wif with
+      | RuntimeOk _ => false
+      | RuntimeError (KeyFormatError e) =>
+        andb (match e, expected with
+          | MainnetKeyRejected, MainnetKeyRejected | WifBadLength, WifBadLength
+          | InvalidScalar, InvalidScalar | BadChecksum, BadChecksum => true
+          | _, _ => false end) (bridge_empty tt)
+      | RuntimeError _ => false
+      end
+    end
+  end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | [selector] =>
+    let text := if String.eqb selector "public-one" then string_of_bytes wif_testnet else "" in
+    if check_identity Testnet text addr_testnet then
+    if check_identity Regtest text addr_regtest then
+    if check_failure (string_of_bytes wif_mainnet) MainnetKeyRejected then
+    if check_failure "" WifBadLength then
+    if check_failure (string_of_bytes wif_zero_scalar) InvalidScalar then
+    if check_failure (string_of_bytes wif_bad_checksum) BadChecksum then
+      match clear_key_bridge tt with
+      | RuntimeOk _ => if bridge_empty tt then print "PASS: runtime WIF identities and failure cleanup" else exit 1
+      | RuntimeError _ => exit 1 end
+    else exit 1 else exit 1 else exit 1 else exit 1 else exit 1 else exit 1
+  | _ => exit 1
+  end.

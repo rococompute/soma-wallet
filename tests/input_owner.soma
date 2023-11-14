@@ -1,0 +1,16 @@
+Import wallet_keys wallet_psbt wallet_input_owner.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+hex (s : string) : bytes := match bytes_of_hex s with Some v => v | None => [] end.
+pub : bytes := hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".
+hash : bytes := hex "751e76e8199196d454941c45d1b3a323f1433bd6".
+id : public_identity := match identity_of_pubkey Testnet pub with KDone v => v | KFail _ => PublicIdentity Testnet [] [] [] end.
+owned_script : bytes := [0,20] ++ hash.
+other_script : bytes := [0,20] ++ repeat 1 20%nat.
+utxo (script : bytes) : entry := Entry [1] (le_bytes 8 2 ++ encode_var script).
+unsigned : tx := Tx 2 [TxIn (repeat 1 36%nat) (repeat 255 4%nat)] [TxOut 1 []] 0.
+framed (m : psbt_map) : bytes := magic ++ serialize_map [Entry [0] (serialize_tx unsigned)] ++ serialize_map m ++ [0].
+check_map (m : psbt_map) : input_owner_result :=
+  match parse_psbt (framed m) with Fail e => InputOwnerError (InputPolicyError e) | Done p => check_psbt_input_owner id p 0%nat end.
