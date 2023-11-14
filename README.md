@@ -215,6 +215,47 @@ Nothing here produces production salts or nonces. Production sealing
 disabled.
 
 
+## SWVP production seal/open primitives (host-verified; booted sealing blocked)
+
+`crypto/vault.c` now also exports SWVP v1 production primitives beside the
+unchanged SWVT test entry points: `vault_prod_begin`, `vault_prod_put`,
+`vault_prod_seal`, `vault_prod_open`, the readers `vault_prod_envelope_byte` and
+`vault_prod_opened_byte` (explicit signer-internal open path only), and the
+boolean audit `vault_prod_cleared`. They use exactly the merged
+`wallet_vault_format.soma` profile: Argon2id v19 with 65536 KiB, 3 passes and
+4 lanes, and XChaCha20-Poly1305 with the complete 64-byte SWVP header as
+associated data, producing or opening the 112-byte envelope. Open compares the
+24 framing/profile header bytes before growing the workspace or running the
+KDF, so SWVT bytes, unknown versions and weak or excessive costs never reach
+Argon2. The 64 MiB Argon2 workspace comes from `memory.grow` on first use, so
+SWVT users keep the small initial memory. It is wiped after every KDF, and all
+staged passwords, keys, derived keys and outputs are wiped on success and
+failure. `vault_lock` now also erases the production state. Salt and nonce are
+caller-supplied: nothing here generates randomness.
+
+`tests/vault-prod-check.mjs` compares a whole public SWVP envelope byte for byte
+with an independent reference: Argon2id from Node's OpenSSL-backed
+`crypto.argon2Sync`, and XChaCha20-Poly1305 from libsodium
+(`tests/vault_prod_reference.py`). It also checks round trip, wrong passphrase,
+flipped salt/nonce/ciphertext/tag bytes (authentication failure, no plaintext),
+all 24 framing bytes, SWVT, weak/excess memory and passes, wrong lanes and
+truncation rejected before the KDF, incomplete staging, caller-written header
+bytes, and wipe/lock audits. `tests/vault_prod_runtime.soma` with
+`tests/test_vault_prod_runtime.py` boots the unikernel and checks the rejection
+and wipe paths there.
+
+Measured cost (this Mac, M-series, hvf): one full SWVP seal takes about 150 ms in
+Node's JIT-compiled WASM (Node's native Argon2id takes about 30 ms). Inside the
+booted unikernel's WASM interpreter it did not finish within 240 s
+(`solo5-hvt --mem=256 -- tests/vault_prod_runtime.hvt --arg=measure`, stopped by
+timeout). Production sealing and opening inside the signer is therefore blocked
+on KDF execution speed, not on format or entropy. Options for a later task:
+a faster WASM execution path in the runtime (outside this repository), or a
+reviewed, lower but still policy-bounded profile, which needs a new format version
+rather than silently weakening SWVP v1. Until then nothing seals real keys:
+`vault_seal` still fails closed, salt/nonce are not generated from entropy, and
+key-slot integration, persistence and UI unlock remain unavailable.
+
 ## Session policy model
 
 `wallet_session.soma` is a pure, typed state machine, separate from the served page.

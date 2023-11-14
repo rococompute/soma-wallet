@@ -1,0 +1,52 @@
+Require Import Sandbox.
+Import crypto.vault.
+
+(** Booted checks of the SWVP v1 production primitives with PUBLIC fixtures
+    (passphrase "pub", scalar-one key, salt 16 x 0x5a, nonce 24 x 0xa5).
+    "reject" (run by tests/test_vault_prod_runtime.py): framing/policy
+    rejection before any KDF, incomplete staging and wipe, all in the unikernel.
+    "measure" (manual only, see README): one full 64-MiB Argon2id seal in the
+    booted WASM interpreter, to measure its cost. Nothing secret is printed. *)
+Recursive stage (slot index : N) (bytes : list N) : bool :=
+  match bytes with
+  | [] => true
+  | b :: rest => if N.eqb (vault_prod_put slot index b) 1 then stage slot (index + 1)%N rest else false
+  end.
+pass : list N := [112%N, 117%N, 98%N].
+key : list N := List.repeat 0%N 31 ++ [1%N].
+salt : list N := List.repeat 90%N 16.
+nonce : list N := List.repeat 165%N 24.
+cleared (token : unit) : bool := N.eqb (vault_prod_cleared 0) 1.
+
+(** A full-length envelope whose header claims SWVT: rejected (7) before the KDF. *)
+swvt_header : list N := [83%N, 87%N, 86%N, 84%N] ++ List.repeat 0%N 108.
+reject_checks (token : unit) : bool :=
+  if negb (N.eqb (vault_prod_begin 3) 1) then false else
+  if negb (stage 0 0 pass) then false else
+  if negb (stage 2 0 swvt_header) then false else
+  if negb (N.eqb (vault_prod_open 112) 7) then false else
+  if negb (cleared tt) then false else
+  if negb (N.eqb (vault_prod_begin 3) 1) then false else
+  if negb (stage 0 0 pass) then false else
+  if negb (stage 2 24 salt) then false else
+  if negb (N.eqb (vault_prod_seal 0) 6) then false else
+  if negb (cleared tt) then false else
+  andb (N.eqb (vault_prod_open 112) 3) (cleared tt).
+
+measure_seal (token : unit) : bool :=
+  if negb (N.eqb (vault_prod_begin 3) 1) then false else
+  if negb (stage 0 0 pass) then false else
+  if negb (stage 1 0 key) then false else
+  if negb (stage 2 24 salt) then false else
+  if negb (stage 2 40 nonce) then false else
+  if negb (N.eqb (vault_prod_seal 0) 1) then false else
+  andb (N.eqb (vault_lock 0) 1) (cleared tt).
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | ["reject"] => if reject_checks tt
+      then print "PASS: booted SWVP header/policy rejection before KDF and wipe" else exit 1
+  | ["measure"] => if measure_seal tt
+      then print "MEASURE: booted SWVP seal completed" else exit 1
+  | _ => exit 1 end.

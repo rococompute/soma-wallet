@@ -11,3 +11,12 @@ vault_envelope_byte : N -> N.
 vault_opened_byte : N -> N.
 vault_inputs_cleared : N -> N.
 vault_locked : N -> N.
+(** SWVP v1 production primitives (caller-supplied salt/nonce; 10 = workspace
+    unavailable). Readers return octets or 256 no output / 257 index. *)
+vault_prod_begin : N -> N.
+vault_prod_put : N -> N -> N -> N.
+vault_prod_seal : N -> N.
+vault_prod_open : N -> N.
+vault_prod_envelope_byte : N -> N.
+vault_prod_opened_byte : N -> N.
+vault_prod_cleared : N -> N.
