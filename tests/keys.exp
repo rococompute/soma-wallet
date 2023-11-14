@@ -1,0 +1,39 @@
+(** Build-failing checked expectations for tests/keys.soma. *)
+Theorem ripemd_vectors :
+  ripemd160 [] = KDone (hex "9c1185a5c5e9fc54612808977ee8f548b2258d31") /\
+  ripemd160 [97, 98, 99] = KDone (hex "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc") /\
+  ripemd160 oversized_ripemd_input = KFail InputTooLong.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem wif_decode :
+  decode_wif wif_testnet = KDone (List.repeat 0 31%nat ++ [1]) /\
+  scalar_valid (hex "0000000000000000000000000000000000000000000000000000000000000001") = true.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem wif_rejections :
+  decode_wif wif_mainnet = KFail MainnetKeyRejected /\
+  decode_wif wif_bad_checksum = KFail BadChecksum /\
+  decode_wif wif_bad_char = KFail InvalidBase58Char /\
+  decode_wif wif_short_input = KFail WifBadLength /\
+  decode_wif wif_uncompressed_marker = KFail UnsupportedCompression /\
+  decode_wif wif_zero_scalar = KFail InvalidScalar /\
+  scalar_valid (List.repeat 0 32%nat) = false.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem identity_vectors :
+  hash160 gen_pub = KDone gen_hash /\
+  id_testnet = KDone (PublicIdentity Testnet gen_pub gen_hash addr_testnet) /\
+  bech32_address Regtest gen_hash = KDone addr_regtest /\
+  bech32_address Testnet gen_hash = KDone addr_testnet.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem octet_range_rejections :
+  identity_of_pubkey Testnet gen_pub_bad_byte = KFail ByteOutOfRange /\
+  bech32_address Testnet gen_hash_bad_byte = KFail ByteOutOfRange.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem ownership_checks :
+  kbind id_testnet (fun id => check_ownership id script_owned) = KDone Owned /\
+  kbind id_testnet (fun id => check_ownership id script_other) = KDone NotOwned /\
+  kbind id_testnet (fun id => check_ownership id script_p2pkh) = KFail UnsupportedScript.
+Proof. vm_compute. repeat split; reflexivity. Qed.

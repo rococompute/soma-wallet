@@ -64,6 +64,30 @@ framed per BIP 174 (both at bitcoin/bips). Not yet: base64 input, BIP 174's
 published base64 PSBT vector suite vendored verbatim, P2SH/P2WSH or
 non-witness-UTXO digest policies, and wiring into the UI or signer.
 
+## Testnet/regtest key import and public identity
+
+`wallet_keys.soma` is a pure, bounded layer inside the signing unikernel: it
+decodes a compressed testnet WIF supplied as 52 ASCII bytes (strict Base58Check
+checksum, version, compression marker and secp256k1 scalar range; mainnet WIF,
+bad checksums, invalid characters, wrong lengths and zero/out-of-order scalars
+are rejected with typed errors, and length checks traverse only a bounded
+prefix), derives HASH160 and Bech32 P2WPKH addresses for explicit testnet
+(`tb`) or regtest (`bcrt`) selection, and checks a P2WPKH witness script
+against the imported key's hash (`Owned` / `NotOwned` / `UnsupportedScript`).
+Public-key and witness-program inputs are validated as octets
+(`ByteOutOfRange`), and the internal RIPEMD-160 is restricted to inputs of at
+most 4096 bytes (`InputTooLong`, never a truncated hash). Public results
+contain only the network, compressed public key, its hash and the address;
+the decoded key type is internal and must never be serialized, logged or
+sent to a browser. Public keys are obtained from the pinned WASM bridge
+(`crypto/signing.soma`); ownership alone authorizes no signature, and fresh
+session approval is still required. Dropping a decoded key does not zeroize
+runtime copies, so a future lock driver must also clear the bridge and
+abandon the value. Checked by `tests/keys.soma`/`.exp` (published
+scalar-one fixtures and RIPEMD-160 vectors) and independently recomputed by
+`tests/test_keys.py`. Not yet wired to key entry, the session driver or PSBT
+signing; no browser key entry, HTTP signing endpoint or persistence was added.
+
 ## Development
 
 Requires the existing local Soma checkout/toolchain, opam switch `hvf` with the

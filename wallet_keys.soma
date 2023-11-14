@@ -1,0 +1,315 @@
+(** Testnet/regtest key import decoding and public identity derivation.
+    Pure and bounded: WIF input is the 52 ASCII bytes of a compressed
+    testnet WIF, held only inside the signing unikernel. [decode_wif]
+    returns secret key bytes in an internal type that must never be
+    serialized, logged or sent to a browser; [identity_of_pubkey] returns
+    only public data. Length checks traverse at most a bounded prefix.
+    Dropping a decoded key does not by itself zeroize runtime copies;
+    lock handling in a future driver must also clear the WASM bridge
+    and abandon the value. No signing is performed here. *)
+
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+kbytes : Type := list int.
+
+Inductive network := Testnet | Regtest.
+Inductive key_error :=
+| WifBadLength
+| InvalidBase58Char
+| BadChecksum
+| MainnetKeyRejected
+| UnsupportedVersion
+| UnsupportedCompression
+| InvalidScalar
+| BadPubkey
+| ByteOutOfRange
+| InputTooLong
+| UnsupportedScript.
+
+Inductive key_outcome (A : Type) := KDone (value : A) | KFail (error : key_error).
+Arguments KDone {A} value.
+Arguments KFail {A} error.
+kbind {A B : Type} (r : key_outcome A) (f : A -> key_outcome B) : key_outcome B :=
+  match r with KDone a => f a | KFail e => KFail e end.
+
+(** [len_is l n] inspects at most n+1 elements; [len_le l n] at most n+1. *)
+Fixpoint len_is (l : kbytes) (n : nat) : bool :=
+  match l with
+  | [] => Nat.eqb n 0%nat
+  | _ :: rest => match n with O => false | S n' => len_is rest n' end
+  end.
+
+Fixpoint len_le (l : kbytes) (fuel : nat) : bool :=
+  match fuel with
+  | O => match l with [] => true | _ => false end
+  | S f => match l with [] => true | _ :: rest => len_le rest f end
+  end.
+
+Fixpoint octets_valid (b : kbytes) : bool :=
+  match b with
+  | [] => true
+  | x :: r => andb (andb (negb (ltb x 0)) (negb (ltb 255 x))) (octets_valid r)
+  end.
+
+hrp_of (n : network) : kbytes := match n with Testnet => [116, 98] | Regtest => [98, 99, 114, 116] end.
+
+(** ** Base58Check WIF decoding *)
+in_range (lo hi x : int) : bool := andb (negb (ltb x lo)) (negb (ltb hi x)).
+
+b58_value (c : int) : int :=
+  if in_range 49 57 c then sub c 49
+  else if in_range 65 72 c then sub c 56
+  else if in_range 74 78 c then sub c 57
+  else if in_range 80 90 c then sub c 58
+  else if in_range 97 107 c then sub c 64
+  else if in_range 109 122 c then sub c 65
+  else 999.
+
+Fixpoint b58_add (acc : kbytes) (carry : int) : kbytes :=
+  match acc with
+  | [] => if eqb carry 0 then [] else [carry]
+  | b :: rest => let v := add (mul b 58) carry in land v 255 :: b58_add rest (lsr v 8)
+  end.
+
+Fixpoint b58_decode (chars : kbytes) (acc_le : kbytes) : key_outcome kbytes :=
+  match chars with
+  | [] => KDone (rev acc_le)
+  | c :: rest =>
+      let v := b58_value c in
+      if eqb v 999 then KFail InvalidBase58Char else b58_decode rest (b58_add acc_le v)
+  end.
+
+Fixpoint k_bytes_eq (a b : kbytes) : bool :=
+  match a, b with
+  | [], [] => true
+  | x :: a', y :: b' => if eqb x y then k_bytes_eq a' b' else false
+  | _, _ => false
+  end.
+
+kdsha (b : kbytes) : kbytes := sha256_of_bytes (sha256_of_bytes b).
+
+scalar_order : kbytes :=
+  [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 254,
+   186, 174, 220, 230, 175, 72, 160, 59, 191, 210, 94, 140, 208, 54, 65, 65].
+
+Fixpoint scalar_below_order (k ord : kbytes) : bool :=
+  match k, ord with
+  | x :: ks, y :: os => if ltb x y then true else if eqb x y then scalar_below_order ks os else false
+  | _, _ => false
+  end.
+
+scalar_valid (k : kbytes) : bool :=
+  andb (existsb (fun x => negb (eqb x 0)) k) (scalar_below_order k scalar_order).
+
+decode_wif (wif : kbytes) : key_outcome kbytes :=
+  if negb (len_is wif 52%nat) then KFail WifBadLength else
+  kbind (b58_decode wif []) (fun decoded =>
+    if negb (len_is decoded 38%nat) then KFail WifBadLength else
+    let payload := firstn 34 decoded in
+    if negb (k_bytes_eq (skipn 34 decoded) (firstn 4 (kdsha payload))) then KFail BadChecksum else
+    let version := nth 0 decoded 0 in
+    if eqb version 128 then KFail MainnetKeyRejected
+    else if negb (eqb version 239) then KFail UnsupportedVersion
+    else if negb (eqb (nth 33 decoded 0) 1) then KFail UnsupportedCompression
+    else let key := skipn 1 (firstn 33 decoded) in
+         if scalar_valid key then KDone key else KFail InvalidScalar).
+
+(** ** RIPEMD-160, restricted to inputs of at most 4096 bytes.
+    Fuel exhaustion with input remaining is a typed error, never a
+    silently truncated hash. *)
+mask32 : int := 4294967295.
+add32 (a b : int) : int := land (add a b) mask32.
+rol32 (x s : int) : int := land (lor (lsl x s) (lsr x (sub 32 s))) mask32.
+not32 (x : int) : int := lxor x mask32.
+
+rf (sel : nat) (x y z : int) : int :=
+  if Nat.eqb sel 0%nat then lxor x (lxor y z)
+  else if Nat.eqb sel 1%nat then lor (land x y) (land (not32 x) z)
+  else if Nat.eqb sel 2%nat then lxor (lor x (not32 y)) z
+  else if Nat.eqb sel 3%nat then lor (land x z) (land y (not32 z))
+  else lxor x (lor y (not32 z)).
+
+rk (sel : nat) : int :=
+  if Nat.eqb sel 0%nat then 0
+  else if Nat.eqb sel 1%nat then 1518500249
+  else if Nat.eqb sel 2%nat then 1859775393
+  else if Nat.eqb sel 3%nat then 2400959708
+  else 2840853838.
+
+rk2 (sel : nat) : int :=
+  if Nat.eqb sel 0%nat then 1352829926
+  else if Nat.eqb sel 1%nat then 1548603684
+  else if Nat.eqb sel 2%nat then 1836072691
+  else if Nat.eqb sel 3%nat then 2053994217
+  else 0.
+
+r1_table : list nat :=
+  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+   7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,
+   3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12,
+   1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
+   4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13]%nat.
+r2_table : list nat :=
+  [5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12,
+   6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2,
+   15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13,
+   8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
+   12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11]%nat.
+s1_table : list int :=
+  [11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8,
+   7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12,
+   11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5,
+   11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
+   9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6].
+s2_table : list int :=
+  [8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6,
+   9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11,
+   9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5,
+   15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
+   8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11].
+
+rstate : Type := (int * int * int * int * int).
+
+word_at (block : kbytes) (i : nat) : int :=
+  let o := Nat.mul 4%nat i in
+  lor (nth o block 0)
+    (lor (lsl (nth (Nat.add o 1%nat) block 0) 8)
+      (lor (lsl (nth (Nat.add o 2%nat) block 0) 16)
+           (lsl (nth (Nat.add o 3%nat) block 0) 24))).
+
+rstep (sel : nat) (k : int) (w s : int) (st : rstate) : rstate :=
+  match st with (a, b, c, d, e) =>
+    let t := add32 (rol32 (add32 (add32 (add32 a (rf sel b c d)) w) k) s) e in
+    (e, t, b, rol32 c 10, d) end.
+
+Fixpoint rsteps (fuel : nat) (block : kbytes) (l r : rstate) : (rstate * rstate) :=
+  match fuel with
+  | O => (l, r)
+  | S f =>
+      let i := Nat.sub 80%nat fuel in
+      let sel := Nat.div i 16%nat in
+      let sel2 := Nat.div (Nat.sub 79%nat i) 16%nat in
+      let l' := rstep sel (rk sel) (word_at block (nth i r1_table 0%nat)) (nth i s1_table 0) l in
+      let r' := rstep sel2 (rk2 sel) (word_at block (nth i r2_table 0%nat)) (nth i s2_table 0) r in
+      rsteps f block l' r'
+  end.
+
+rblock (block : kbytes) (h : rstate) : rstate :=
+  match h with (h0, h1, h2, h3, h4) =>
+    match rsteps 80%nat block (h0, h1, h2, h3, h4) (h0, h1, h2, h3, h4) with
+    | ((a, b, c, d, e), (a2, b2, c2, d2, e2)) =>
+        (add32 h1 (add32 c d2), add32 h2 (add32 d e2), add32 h3 (add32 e a2),
+         add32 h4 (add32 a b2), add32 h0 (add32 b c2))
+    end
+  end.
+
+le32_bytes (v : int) : kbytes := [land v 255, land (lsr v 8) 255, land (lsr v 16) 255, land (lsr v 24) 255].
+
+Fixpoint rblocks (fuel : nat) (b : kbytes) (h : rstate) : key_outcome rstate :=
+  match fuel with
+  | O => match b with [] => KDone h | _ => KFail InputTooLong end
+  | S f =>
+      match b with
+      | [] => KDone h
+      | _ => rblocks f (skipn 64 b) (rblock (firstn 64 b) h)
+      end
+  end.
+
+ripemd160 (msg : kbytes) : key_outcome kbytes :=
+  if negb (len_le msg 4096%nat) then KFail InputTooLong else
+  let n := List.length msg in
+  let rem := Nat.modulo (Nat.add n 1%nat) 64%nat in
+  let zeros := if Nat.leb rem 56%nat then Nat.sub 56%nat rem else Nat.sub 120%nat rem in
+  let padded := msg ++ [128] ++ List.repeat 0 zeros
+    ++ le32_bytes (mul (fold_left (fun a _ => add a 1) msg 0) 8) ++ [0, 0, 0, 0] in
+  kbind (rblocks 67%nat padded (1732584193, 4023233417, 2562383102, 271733878, 3285377520))
+    (fun st => match st with (h0, h1, h2, h3, h4) =>
+      KDone (le32_bytes h0 ++ le32_bytes h1 ++ le32_bytes h2 ++ le32_bytes h3 ++ le32_bytes h4) end).
+
+hash160 (pubkey : kbytes) : key_outcome kbytes := ripemd160 (sha256_of_bytes pubkey).
+
+(** ** Bech32 (BIP 173) for witness version 0 *)
+bech32_charset : kbytes :=
+  [113, 112, 122, 114, 121, 57, 120, 56, 103, 102, 50, 116, 118, 100, 119, 48,
+   115, 51, 106, 110, 53, 52, 107, 104, 99, 101, 54, 109, 117, 97, 55, 108].
+
+hash_group (h : kbytes) (i : nat) : int :=
+  let bitpos := Nat.mul 5%nat i in
+  let byte_i := Nat.div bitpos 8%nat in
+  let off := Nat.modulo bitpos 8%nat in
+  let pair := lor (lsl (nth byte_i h 0) 8) (nth (Nat.add byte_i 1%nat) h 0) in
+  land (lsr pair (sub 11 (fold_left (fun a _ => add a 1) (List.repeat 0 off) 0))) 31.
+
+Fixpoint hash_groups (fuel : nat) (h : kbytes) (acc : kbytes) : kbytes :=
+  match fuel with
+  | O => rev acc
+  | S f => hash_groups f h (hash_group h (Nat.sub 32%nat fuel) :: acc)
+  end.
+
+bech32_generators : kbytes := [996825010, 642813549, 513874426, 1027748829, 705979059].
+
+Fixpoint polymod_bits (fuel : nat) (chk top : int) : int :=
+  match fuel with
+  | O => chk
+  | S f =>
+      let i := Nat.sub 5%nat fuel in
+      let g := nth i bech32_generators 0 in
+      let bit := land (lsr top (fold_left (fun a _ => add a 1) (List.repeat 0 i) 0)) 1 in
+      polymod_bits f (if eqb bit 1 then lxor chk g else chk) top
+  end.
+
+polymod_step (chk v : int) : int :=
+  polymod_bits 5%nat (lxor (lsl (land chk 33554431) 5) v) (lsr chk 25).
+
+Fixpoint polymod (values : kbytes) (chk : int) : int :=
+  match values with [] => chk | v :: rest => polymod rest (polymod_step chk v) end.
+
+hrp_expand (hrp : kbytes) : kbytes :=
+  map (fun c => lsr c 5) hrp ++ [0] ++ map (fun c => land c 31) hrp.
+
+Fixpoint checksum_groups (fuel : nat) (pm : int) (acc : kbytes) : kbytes :=
+  match fuel with
+  | O => rev acc
+  | S f =>
+      let shift := Nat.mul 5%nat (Nat.sub fuel 1%nat) in
+      checksum_groups f pm (land (lsr pm (fold_left (fun a _ => add a 1) (List.repeat 0 shift) 0)) 31 :: acc)
+  end.
+
+Fixpoint char_at (vals : kbytes) (target pos : int) : int :=
+  match vals with
+  | [] => 0
+  | c :: rest => if eqb pos target then c else char_at rest target (add pos 1)
+  end.
+bech32_char (v : int) : int := char_at bech32_charset v 0.
+
+bech32_address (n : network) (hash : kbytes) : key_outcome kbytes :=
+  if negb (len_is hash 20%nat) then KFail BadPubkey
+  else if negb (octets_valid hash) then KFail ByteOutOfRange else
+  let data := 0 :: hash_groups 32%nat hash [] in
+  let pm := lxor (polymod (hrp_expand (hrp_of n) ++ data ++ [0, 0, 0, 0, 0, 0]) 1) 1 in
+  KDone (hrp_of n ++ [49] ++ map bech32_char (data ++ checksum_groups 6%nat pm [])).
+
+(** ** Public identity and ownership *)
+Inductive public_identity := PublicIdentity
+  (net : network) (pubkey : kbytes) (key_hash : kbytes) (address : kbytes).
+
+identity_of_pubkey (n : network) (pubkey : kbytes) : key_outcome public_identity :=
+  if negb (len_is pubkey 33%nat) then KFail BadPubkey
+  else if negb (octets_valid pubkey) then KFail ByteOutOfRange
+  else if negb (orb (eqb (nth 0 pubkey 0) 2) (eqb (nth 0 pubkey 0) 3)) then KFail BadPubkey
+  else kbind (hash160 pubkey) (fun h =>
+       kbind (bech32_address n h) (fun addr => KDone (PublicIdentity n pubkey h addr))).
+
+p2wpkh_script (h : kbytes) : kbytes := [0, 20] ++ h.
+
+Inductive ownership := Owned | NotOwned.
+check_ownership (id : public_identity) (script : kbytes) : key_outcome ownership :=
+  match id with PublicIdentity _ _ h _ =>
+    if k_bytes_eq script (p2wpkh_script h) then KDone Owned
+    else if andb (len_is script 22%nat)
+                 (andb (eqb (nth 0 script 0) 0) (eqb (nth 1 script 0) 20))
+         then KDone NotOwned
+         else KFail UnsupportedScript
+  end.

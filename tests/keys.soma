@@ -1,0 +1,28 @@
+Import wallet_keys.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+hex (s : string) : kbytes := match bytes_of_hex s with Some l => l | None => [] end.
+
+(** Published public fixtures: WIF encodings of the documented scalar-one
+    test key; crafted variants carry valid checksums (see tests/test_keys.py). *)
+wif_testnet : kbytes := [99, 77, 97, 104, 101, 97, 55, 122, 113, 106, 120, 114, 116, 103, 65, 98, 66, 55, 76, 83, 71, 98, 99, 81, 85, 114, 49, 117, 88, 49, 111, 106, 117, 97, 116, 57, 106, 90, 111, 100, 77, 78, 56, 55, 74, 99, 98, 88, 77, 84, 99, 65].
+wif_mainnet : kbytes := [75, 119, 68, 105, 66, 102, 56, 57, 81, 103, 71, 98, 106, 69, 104, 75, 110, 104, 88, 74, 117, 72, 55, 76, 114, 99, 105, 86, 114, 90, 105, 51, 113, 89, 106, 103, 100, 57, 77, 55, 114, 70, 85, 55, 51, 115, 86, 72, 110, 111, 87, 110].
+wif_bad_checksum : kbytes := [99, 77, 97, 104, 101, 97, 55, 122, 113, 106, 120, 114, 116, 103, 65, 98, 66, 55, 76, 83, 71, 98, 99, 81, 85, 114, 49, 117, 88, 49, 111, 106, 117, 97, 116, 57, 106, 90, 111, 100, 77, 78, 56, 55, 74, 99, 98, 88, 77, 84, 99, 66].
+wif_bad_char : kbytes := [48, 77, 97, 104, 101, 97, 55, 122, 113, 106, 120, 114, 116, 103, 65, 98, 66, 55, 76, 83, 71, 98, 99, 81, 85, 114, 49, 117, 88, 49, 111, 106, 117, 97, 116, 57, 106, 90, 111, 100, 77, 78, 56, 55, 74, 99, 98, 88, 77, 84, 99, 65].
+wif_short_input : kbytes := firstn 51 wif_testnet.
+wif_uncompressed_marker : kbytes := [99, 77, 97, 104, 101, 97, 55, 122, 113, 106, 120, 114, 116, 103, 65, 98, 66, 55, 76, 83, 71, 98, 99, 81, 85, 114, 49, 117, 88, 49, 111, 106, 117, 97, 116, 57, 106, 90, 111, 100, 77, 78, 56, 55, 74, 99, 87, 98, 105, 106, 121, 122].
+wif_zero_scalar : kbytes := [99, 77, 97, 104, 101, 97, 55, 122, 113, 106, 120, 114, 116, 103, 65, 98, 66, 55, 76, 83, 71, 98, 99, 81, 85, 114, 49, 117, 88, 49, 111, 106, 117, 97, 116, 57, 106, 90, 111, 100, 77, 78, 56, 55, 74, 55, 103, 56, 114, 89, 57, 116].
+
+gen_pub : kbytes := hex "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".
+gen_pub_bad_byte : kbytes := [2, 300] ++ skipn 2 gen_pub.
+gen_hash : kbytes := hex "751e76e8199196d454941c45d1b3a323f1433bd6".
+gen_hash_bad_byte : kbytes := [300] ++ skipn 1 gen_hash.
+addr_testnet : kbytes := [116, 98, 49, 113, 119, 53, 48, 56, 100, 54, 113, 101, 106, 120, 116, 100, 103, 52, 121, 53, 114, 51, 122, 97, 114, 118, 97, 114, 121, 48, 99, 53, 120, 119, 55, 107, 120, 112, 106, 122, 115, 120].
+addr_regtest : kbytes := [98, 99, 114, 116, 49, 113, 119, 53, 48, 56, 100, 54, 113, 101, 106, 120, 116, 100, 103, 52, 121, 53, 114, 51, 122, 97, 114, 118, 97, 114, 121, 48, 99, 53, 120, 119, 55, 107, 121, 103, 116, 48, 56, 48].
+id_testnet : key_outcome public_identity := identity_of_pubkey Testnet gen_pub.
+script_owned : kbytes := p2wpkh_script gen_hash.
+script_other : kbytes := [0, 20] ++ List.repeat 1 20%nat.
+script_p2pkh : kbytes := [118, 169] ++ gen_hash ++ [136, 172].
+oversized_ripemd_input : kbytes := List.repeat 65 4097%nat.
