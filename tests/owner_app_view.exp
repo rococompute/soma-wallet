@@ -1,0 +1,10 @@
+Theorem revision_text_is_bounded :
+  revision_text 0%N = Some "0" /\ revision_text 4294967297%N = Some "4294967297" /\
+  revision_digits 1%nat 10%N [] = None.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+Theorem public_commands_keep_context_gates :
+  map_http_command (HttpApproveRevision 4294967297%N) = UiApproveRevision 4294967297%N /\
+  map_http_command HttpImportPublicFixture = UiImportPublicFixture /\
+  map_http_command (HttpSignInput 63%N) = UiSignInput 63%N /\
+  connection_for_tag 0%N = None /\ connection_for_tag 65537%N = None.
+Proof. vm_compute. repeat split; reflexivity. Qed.

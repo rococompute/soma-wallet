@@ -1,0 +1,17 @@
+Import wallet_psbt wallet_review wallet_owner_http.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+line (s : string) : string := String.append s crlf.
+post (path body : string) (extra : string) : string := txt [
+  line (txt ["POST ",path," HTTP/1.1"]), line "Host: wallet",
+  line "Content-Type: application/x-www-form-urlencoded",
+  line (txt ["Content-Length: ", decimal (count (bytes_of_string body))]),
+  extra, crlf, body].
+get : string := txt [line "GET / HTTP/1.1", line "Host: wallet", crlf].
+error_of (r : owner_http_result) : option owner_http_error :=
+  match r with HttpRejected e => Some e | HttpCommand _ => None end.
+
+(** Existing public synthetic regtest PSBT, form-encoded independently by Python. *)
+fixture_body : string := "psbt=cHNidP8BAFICAAAAASpJMQ6eWqPL3yAOqkLGoZEKHiCFQbNnynXJebrE71iiAAAAAAD9%2F%2F%2F%2FAbiCAQAAAAAAFgAUBq%2FUa839Iu%2BUrBIqoR8kEkSjfswAAAAAAvwBAqq7AAEBH6CGAQAAAAAAFgAUdR526BmRltRUlBxF0bOjI%2FFDO9YC%2FAIBzAAC%2FAMB3QA%3D".
+fixture_raw : bytes := match bytes_of_hex "70736274ff01005202000000012a49310e9e5aa3cbdf200eaa42c6a1910a1e208541b367ca75c979bac4ef58a20000000000fdffffff01b88201000000000016001406afd46bcdfd22ef94ac122aa11f241244a37ecc0000000002fc0102aabb0001011fa086010000000000160014751e76e8199196d454941c45d1b3a323f1433bd602fc0201cc0002fc0301dd00" with Some b => b | None => [] end.

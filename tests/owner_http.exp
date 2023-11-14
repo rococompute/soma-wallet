@@ -1,0 +1,88 @@
+Theorem complete_commands :
+  decode_owner_http get = HttpCommand HttpInspect /\
+  decode_owner_http (post "/fixture" "" "") = HttpCommand HttpImportPublicFixture /\
+  decode_owner_http (post "/lock" "" "") = HttpCommand HttpLock /\
+  decode_owner_http (post "/reset" "" "") = HttpCommand HttpReset /\
+  decode_owner_http (post "/approve" "revision=4294967297" "") =
+    HttpCommand (HttpApproveRevision 4294967297%N) /\
+  decode_owner_http (post "/sign" "input=63" "") = HttpCommand (HttpSignInput 63%N).
+Proof. vm_compute. repeat split; reflexivity. Qed.
+Theorem decimal_bounds :
+  canonical_decimal 64 (bytes_of_string "0") = Some 0%N /\
+  canonical_decimal 64 (bytes_of_string "01") = None /\
+  canonical_decimal 64 (repeat 57 65%nat) = None /\
+  canonical_decimal 64 (bytes_of_string "-1") = None /\
+  canonical_decimal 64 (bytes_of_string "1e3") = None.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+Theorem no_implicit_approval :
+  error_of (decode_owner_http (post "/approve" "" "")) = Some HttpBody /\
+  error_of (decode_owner_http (post "/approve" "revision=1&revision=2" "")) = Some HttpBody /\
+  error_of (decode_owner_http (post "/approve" "revision=1&key=secret" "")) = Some HttpBody /\
+  error_of (decode_owner_http (post "/approve" "revision=%FF" "")) = Some HttpRevision /\
+  error_of (decode_owner_http (post "/sign" "input=64" "")) = Some HttpInputIndex /\
+  error_of (decode_owner_http (post "/sign" "input=4294967297" "")) = Some HttpInputIndex.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+Theorem ambiguous_framing_never_dispatches :
+  error_of (decode_owner_http (post "/lock" "" (line "Content-Length: 0"))) = Some HttpLength /\
+  error_of (decode_owner_http (post "/lock" "" (line "Transfer-Encoding: chunked"))) = Some HttpTransferEncoding /\
+  error_of (decode_owner_http (post "/lock" "" (line "Content-Type: application/x-www-form-urlencoded"))) = Some HttpContentType /\
+  error_of (decode_owner_http (post "/lock" "" (line "Host: other"))) = Some HttpHeaders /\
+  error_of (decode_owner_http (post "/lock" "" (line " Content-Length: 0"))) = Some HttpHeaders /\
+  error_of (decode_owner_http (post "/lock" "" (line "X-Test: ok"))) = None.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+Theorem incomplete_and_trailing_body_never_dispatch :
+  error_of (decode_owner_http "POST /lock HTTP/1.1") = Some HttpIncomplete /\
+  error_of (decode_owner_http (txt [line "POST /lock HTTP/1.1", line "Host: wallet",
+    line "Content-Type: application/x-www-form-urlencoded", line "Content-Length: 4", crlf])) = Some HttpIncomplete /\
+  error_of (decode_owner_http (String.append (post "/lock" "" "") "x")) = Some HttpLength /\
+  error_of (decode_owner_http (String.append (post "/lock" "" "") get)) = Some HttpLength.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+Theorem psbt_errors_are_typed :
+  error_of (decode_owner_http (post "/review" "psbt=abc" "")) = Some (HttpPsbt InvalidBase64Padding) /\
+  error_of (decode_owner_http (post "/review" "psbt=abcd%20abcd" "")) = Some (HttpPsbt InvalidBase64Char) /\
+  error_of (decode_owner_http (post "/fixture" "wif=secret" "")) = Some HttpBody.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem public_fixture_decodes_exactly :
+  decode_owner_http (post "/review" fixture_body "") = HttpCommand (HttpLoadPsbt fixture_raw).
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem request_limit_rejects_before_copy : forall request,
+  string_within request 300000 = false ->
+  decode_owner_http request = HttpRejected HttpTooLarge.
+Proof. intros request H. unfold decode_owner_http. rewrite H. reflexivity. Qed.
+
+Theorem header_limit_rejects_before_line_split : forall request,
+  string_within request 300000 = true ->
+  has_head_end (bytes_of_string request) = true ->
+  list_within (head_of (bytes_of_string request)) 8192 = false ->
+  decode_owner_http request = HttpRejected HttpTooLarge.
+Proof.
+  intros request Hrequest Hhead Hlimit. unfold decode_owner_http.
+  rewrite Hrequest. cbn [negb]. rewrite Hhead. cbn [negb].
+  rewrite Hlimit. reflexivity.
+Qed.
+
+Theorem too_many_headers_rejected :
+  error_of (decode_owner_http (txt [line "GET / HTTP/1.1", line "Host: wallet",
+    String.concat "" (List.repeat (line "X-Test: public") 64%nat), crlf])) = Some HttpHeaders.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem header_controls_and_length_aliases_rejected :
+  error_of (decode_owner_http (post "/lock" "" (line (String.append "X-Test: a" (string_of_bytes [10,98]))))) = Some HttpHeaders /\
+  error_of (decode_owner_http (txt [line "POST /lock HTTP/1.1", line "Host: wallet",
+    line "Content-Type: application/x-www-form-urlencoded", line "Content-Length: 00", crlf])) = Some HttpLength /\
+  error_of (decode_owner_http (txt [line "POST /lock HTTP/1.1", line "Host: wallet",
+    line "Content-Type: application/x-www-form-urlencoded", line "Content-Length: +0", crlf])) = Some HttpLength /\
+  error_of (decode_owner_http (post "/lock" "" (line "transfer-encoding: identity"))) = Some HttpTransferEncoding.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem malformed_header_names_and_request_suffixes_rejected :
+  error_of (decode_owner_http (post "/lock" "" (line "Transfer-Encoding : chunked"))) = Some HttpHeaders /\
+  error_of (decode_owner_http (post "/lock" "" (line "Content-Length : 0"))) = Some HttpHeaders /\
+  error_of (decode_owner_http (post "/lock" "" (line "broken-header"))) = Some HttpHeaders /\
+  error_of (decode_owner_http (txt [line "POST /lock HTTP/1.1 suffix", line "Host: wallet",
+    line "Content-Type: application/x-www-form-urlencoded", line "Content-Length: 0", crlf])) = Some HttpUnknownRoute /\
+  error_of (decode_owner_http (txt [line "POST /lock HTTP/9.9", line "Host: wallet",
+    line "Content-Type: application/x-www-form-urlencoded", line "Content-Length: 0", crlf])) = Some HttpUnknownRoute.
+Proof. vm_compute. repeat split; reflexivity. Qed.

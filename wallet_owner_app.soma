@@ -1,0 +1,145 @@
+(** Development-only host UI. One first-read request per tracked connection;
+    no secret-entry route. Run only host-isolated, with public fixtures. *)
+Import wallet_psbt.
+Import wallet_keys.
+Import wallet_session.
+Import wallet_ui.
+Import wallet_review.
+Import wallet_sign_owner.
+Import wallet_owner_context.
+Import wallet_owner_http.
+Require Import Sandbox JSX Crypto Soma.Show.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+Fixpoint revision_digits (fuel : nat) (value : N) (acc : list Ascii.ascii) : option string :=
+  match fuel with
+  | O => None
+  | S more =>
+    let digit := Ascii.ascii_of_N (N.add 48 (N.modulo value 10)) in
+    let remaining := N.div value 10 in
+    if N.eqb remaining 0 then Some (fold_right String.String String.EmptyString (digit :: acc))
+    else revision_digits more remaining (digit :: acc)
+  end.
+revision_text (value : N) : option string := revision_digits 64%nat value [].
+
+stage_text (stage : owner_view_stage) : string := match stage with
+| ViewLocked => "Wallet locked" | ViewImported => "Public test key imported"
+| ViewReview => "Review every output and fee" | ViewApproved => "Approved for one signing attempt"
+| ViewSigning => "Signing; approval consumed" | ViewSigned => "Signed PSBT ready" end.
+empty_action (path label : string) (enabled : bool) : element unit :=
+  if enabled then <form method="post" action=path> <button type="submit"> label </button> </form>
+  else <p> <button disabled="disabled"> label </button> " Unavailable in this state." </p>.
+review_content (r : review) : element unit := match r with
+| Review version locktime ins outs total fee =>
+  <section><h2> "Transaction review" </h2>
+    <p> "Version " (decimal version) "; locktime " (decimal locktime) </p>
+    <h3> "Outputs" </h3>
+    <table><thead><tr><th> "Amount" </th><th> "Kind" </th><th> "Script and addresses" </th></tr></thead>
+      <tbody> (output_rows outs) </tbody></table>
+    <p> "Total out: " (decimal total) " sat" </p>
+    <p> "Total in: " (total_in_text fee) </p><p> "Fee: " (fee_text fee) </p>
+    <h3> "Inputs" </h3><p> "Witness amounts are claims in the PSBT, not authenticated UTXOs." </p>
+    <table><thead><tr><th> "Previous txid" </th><th> "Output" </th><th> "Claimed amount" </th></tr></thead>
+      <tbody> (input_rows ins) </tbody></table></section>
+end.
+app_layout (content : element unit) : element unit :=
+  <html><head><title> "Soma Wallet public-fixture workspace" </title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style> (txt [css,"form{margin:.6rem 0}input{font:inherit;max-width:100%;box-sizing:border-box}button{margin:.2rem 0}code{overflow-wrap:anywhere}"]) </style>
+  </head><body><main><h1> "Soma Wallet public-fixture workspace" </h1>
+    <p> "Development only. Testnet/regtest public fixture; no real keys or funds. Never broadcasts. No browser key entry, vault or persistence." </p>
+    content <p><a href="/"> "Current wallet" </a></p>
+  </main></body></html>.
+app_page (fixture_enabled : bool) (view : owner_public_view) : element unit :=
+  match view with OwnerPublicView revision stage identity reviewed can_approve can_sign can_export =>
+  app_layout (fragment [
+    <section><h2> "Status" </h2><p> (stage_text stage) </p></section>,
+    <section><h2> "Signer-side public fixture" </h2>
+      <p> "Import selects the documented scalar-one regtest fixture inside the signer. The request never carries a WIF or scalar." </p>
+      (empty_action "/fixture" "Import public test fixture" fixture_enabled)
+      (match identity with None => <p> "No key is imported." </p>
+       | Some (PublicIdentity _ pub _ address) =>
+         <p> "Public key: " <code> (hex_text pub) </code> <br /> "Address: " <code> (string_of_bytes address) </code> </p> end)
+    </section>,
+    <section><h2> "Load PSBT" </h2>
+      <form method="post" action="/review"><label> "PSBT v0 (Base64)" <textarea name="psbt" rows="6" required="required"> "" </textarea></label>
+        (match identity with Some _ => <button type="submit"> "Load and review" </button>
+         | None => <button disabled="disabled"> "Import the public fixture first" </button> end)
+      </form></section>,
+    (match reviewed with None => <p> "No transaction review." </p> | Some r => review_content r end),
+    <section><h2> "Explicit approval" </h2>
+      (match revision_text revision with
+       | Some value => if can_approve then
+         <form method="post" action="/approve"><input type="hidden" name="revision" value=value />
+           <p> "Review revision: " <code> value </code> </p><button type="submit"> "I reviewed all outputs and the fee; approve this revision" </button></form>
+         else <button disabled="disabled"> "Approval unavailable" </button>
+       | None => <p> "Review revision unavailable; approval disabled." </p> end)
+    </section>,
+    <section><h2> "Sign one input" </h2>
+      (if can_sign then <form method="post" action="/sign"><label> "Input index" <input type="number" name="input" value="0" min="0" max="63" required="required" /></label>
+         <button type="submit"> "Sign approved input" </button></form>
+       else <p><button disabled="disabled"> "Sign approved input" </button> " A fresh approval is required." </p>)
+      (if can_export then <p><a href="/export" download="signed.psbt"> "Download signed PSBT" </a></p>
+       else <p><button disabled="disabled"> "Download signed PSBT" </button> " No signed export." </p>)
+    </section>,
+    <section><h2> "Erase and reset" </h2> (empty_action "/lock" "Lock wallet" true)
+      (empty_action "/reset" "Reset wallet" true)</section>
+  ]) end.
+app_rejection (message : string) : string := html_response (render (app_layout
+  <section><h2> "Request rejected" </h2><p> message </p><p> "No successful action is claimed. Reload the current wallet to see its installed state." </p></section>)).
+map_http_command (command : owner_http_command) : ui_owner_command := match command with
+| HttpInspect => UiInspect | HttpImportPublicFixture => UiImportPublicFixture
+| HttpLoadPsbt raw => UiLoadPsbt raw | HttpApproveRevision revision => UiApproveRevision revision
+| HttpSignInput index => UiSignInput index | HttpExport => UiExportPsbt
+| HttpLock => UiLock | HttpReset => UiReset end.
+
+(** Tags come only from accepted runtime connections, never from request text.
+    Retire this development listener after connection id 65535. *)
+connection_for_tag (tag : N) : option connection :=
+  if andb (0 <? tag)%N (tag <=? 65536)%N then Some (Connection (N.to_nat (N.pred tag))) else None.
+send_close (c : connection) (data : string) : io unit := ignored <- send c data ;; close c.
+reply_tag (tag : N) (data : string) : io unit :=
+  match connection_for_tag tag with None => ret tt | Some c => send_close c data end.
+app_emit (fixture_enabled : bool) (response : ui_owner_response) : io unit :=
+  match response with
+  | UiOwnerView tag view => reply_tag tag (html_response (render (app_page fixture_enabled view)))
+  | UiOwnerRejected tag _ _ => reply_tag tag (app_rejection "The review revision is stale, the action is unavailable, or fixture mode was not enabled at boot.")
+  | UiOwnerEvent tag _ (OwnerRejected _) => reply_tag tag (app_rejection "The owner refused this action. Approval may already be consumed, the input may be unsupported, or no export exists.")
+  | UiOwnerEvent tag _ (OwnerExported raw _) =>
+    reply_tag tag (txt ["HTTP/1.1 200 OK",crlf,"Content-Type: application/octet-stream",crlf,
+      "Content-Disposition: attachment; filename=signed.psbt",crlf,"Cache-Control: no-store",crlf,
+      "X-Content-Type-Options: nosniff",crlf,"Content-Length: ",to_string (String.length (string_of_bytes raw)),crlf,
+      "Connection: close",crlf,crlf,string_of_bytes raw])
+  | _ => ret tt end.
+
+Inductive app_cursor := AppCursor (events : list link_event) (open_ids : list nat).
+remove_id (id : nat) (ids : list nat) : list nat := filter (fun other => negb (Nat.eqb id other)) ids.
+Fixpoint app_poll (fuel : nat) (cursor : app_cursor) : io (ui_owner_request * app_cursor) :=
+  match fuel with
+  | O => ret (UiOwnerRequest 0%N UiInspect, cursor)
+  | S more => match cursor with AppCursor events opened =>
+    match events with
+    | [] => incoming <- mailbox 100%N ;; app_poll more (AppCursor (firstn 64%nat incoming) opened)
+    | event :: rest => match event with
+      | LinkOpened (Connection id) _ =>
+        if andb (Nat.leb id 65535%nat) (Nat.ltb (List.length opened) 16%nat) then
+          app_poll more (AppCursor rest (id :: remove_id id opened))
+        else close (Connection id) ;; app_poll more (AppCursor rest opened)
+      | LinkClosed (Connection id) => app_poll more (AppCursor rest (remove_id id opened))
+      | LinkBytes (Connection id) data =>
+        if existsb (Nat.eqb id) opened then
+          let following := AppCursor rest (remove_id id opened) in
+          match decode_owner_http data with
+          | HttpRejected _ => send_close (Connection id) (app_rejection "Incomplete, malformed or oversized request framing or form. Submit one complete request; fragmented requests are unavailable.") ;;
+              app_poll more following
+          | HttpCommand command => ret (UiOwnerRequest (N.succ (N.of_nat id)) (map_http_command command), following)
+          end
+        else close (Connection id) ;; app_poll more (AppCursor rest opened)
+      end
+    end end
+  end.
+app_next (cursor : app_cursor) (view : owner_public_view) : io (ui_owner_request * app_cursor) := app_poll 16%nat cursor.
+run_owner_app (fixture_enabled : bool) : io unit :=
+  listen_mailbox 8081%nat ;; print "OWNER_UI_READY" ;;
+  run_owner_context fixture_enabled app_next (AppCursor [] []) (app_emit fixture_enabled).

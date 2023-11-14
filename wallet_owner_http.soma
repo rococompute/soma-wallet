@@ -1,0 +1,143 @@
+(** Pure HTTP-to-command boundary, not a listener or an authorization layer.
+    Nothing here imports a key, changes owner state, approves or signs. Feed
+    only accepted commands to ONE owner/context; its revision/fixture gates
+    remain mandatory. A first-read server must reject incomplete input rather
+    than dispatching a valid prefix. No WIF/handle/session command exists. *)
+Import wallet_psbt wallet_review.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+Inductive owner_http_command :=
+| HttpInspect | HttpImportPublicFixture | HttpLoadPsbt (raw : bytes)
+| HttpApproveRevision (revision : N) | HttpSignInput (index : N)
+| HttpExport | HttpLock | HttpReset.
+Inductive owner_http_error :=
+| HttpTooLarge | HttpIncomplete | HttpRequestLine | HttpUnknownRoute
+| HttpMethod | HttpHeaders | HttpLength | HttpTransferEncoding
+| HttpContentType | HttpBody | HttpRevision | HttpInputIndex
+| HttpPsbt (error : parse_error).
+Inductive owner_http_result := HttpCommand (command : owner_http_command)
+  | HttpRejected (error : owner_http_error).
+
+(** Decimals remain binary N. Bounds precede arithmetic/conversion; input
+    indexes are range checked before any future unary/foreign conversion. *)
+Fixpoint decimal_n (raw : bytes) (acc : N) : option N :=
+  match raw with
+  | [] => Some acc
+  | c :: rest => if andb (negb (ltb c 48)) (negb (ltb 57 c)) then
+      decimal_n rest (N.add (N.mul acc 10) (Ascii.N_of_ascii (Sha256.ascii_of_byte (sub c 48))))
+    else None end.
+canonical_decimal (limit : int) (raw : bytes) : option N :=
+  if negb (list_within raw limit) then None else
+  match raw with
+  | [] => None
+  | first :: rest => if andb (eqb first 48) (negb (Nat.eqb (List.length rest) 0))
+      then None else decimal_n raw 0%N end.
+
+header_token (c : int) : bool :=
+  orb (andb (negb (ltb c 48)) (negb (ltb 57 c)))
+  (orb (andb (negb (ltb c 65)) (negb (ltb 90 c)))
+  (orb (andb (negb (ltb c 97)) (negb (ltb 122 c)))
+    (existsb (fun x => eqb x c) [33,35,36,37,38,39,42,43,45,46,94,95,96,124,126]))).
+header_value_byte (c : int) : bool := orb (eqb c 9)
+  (andb (negb (ltb c 32)) (negb (ltb 126 c))).
+header_line_ok (line : bytes) : bool :=
+  match split_colon line [] with
+  | None => false
+  | Some (name, value) =>
+    match name with [] => false | _ =>
+      andb (forallb header_token name) (forallb header_value_byte value) end
+  end.
+
+(** Require one ordinary Host header; reject folding, controls, duplicate
+    lengths/types and all Transfer-Encoding. Unknown valid headers are ignored.
+    The Host is framing data only, never authenticated identity. *)
+headers_ok (lines : list bytes) : bool :=
+  if negb (list_within lines 64) then false else
+  if negb (forallb header_line_ok lines) then false else
+  match header_values (bytes_of_string "host") lines with
+  | [host] => match host with [] => false | _ => list_within host 255 end
+  | _ => false end.
+
+Inductive owner_http_route := RouteInspect | RouteFixture | RouteLoad
+  | RouteApprove | RouteSign | RouteExport | RouteLock | RouteReset.
+route_for (line : bytes) : option (bool * owner_http_route) :=
+  if bytes_eqb line (bytes_of_string "GET / HTTP/1.1") then Some (false, RouteInspect) else
+  if bytes_eqb line (bytes_of_string "GET /export HTTP/1.1") then Some (false, RouteExport) else
+  if bytes_eqb line (bytes_of_string "POST /fixture HTTP/1.1") then Some (true, RouteFixture) else
+  if bytes_eqb line (bytes_of_string "POST /review HTTP/1.1") then Some (true, RouteLoad) else
+  if bytes_eqb line (bytes_of_string "POST /approve HTTP/1.1") then Some (true, RouteApprove) else
+  if bytes_eqb line (bytes_of_string "POST /sign HTTP/1.1") then Some (true, RouteSign) else
+  if bytes_eqb line (bytes_of_string "POST /lock HTTP/1.1") then Some (true, RouteLock) else
+  if bytes_eqb line (bytes_of_string "POST /reset HTTP/1.1") then Some (true, RouteReset) else None.
+
+one_form_value (name : string) (body : bytes) : option bytes :=
+  let prefix := bytes_of_string (String.append name "=") in
+  if starts_with prefix body then form_value (skipn (List.length prefix) body) else None.
+command_body (route : owner_http_route) (body : bytes) : owner_http_result :=
+  match route with
+  | RouteLoad => match one_form_value "psbt" body with
+    | None => HttpRejected HttpBody
+    | Some text => match parse_psbt_base64 text with
+      | Fail e => HttpRejected (HttpPsbt e)
+      | Done p => HttpCommand (HttpLoadPsbt (serialize_psbt p)) end end
+  | RouteApprove => match one_form_value "revision" body with
+    | None => HttpRejected HttpBody
+    | Some value => match canonical_decimal 64 value with
+      | None => HttpRejected HttpRevision
+      | Some revision => HttpCommand (HttpApproveRevision revision) end end
+  | RouteSign => match one_form_value "input" body with
+    | None => HttpRejected HttpBody
+    | Some value => match canonical_decimal 2 value with
+      | None => HttpRejected HttpInputIndex
+      | Some index => if (index <=? 63)%N then HttpCommand (HttpSignInput index)
+        else HttpRejected HttpInputIndex end end
+  | _ => if negb (Nat.eqb (List.length body) 0) then HttpRejected HttpBody else
+    HttpCommand (match route with
+    | RouteInspect => HttpInspect | RouteFixture => HttpImportPublicFixture
+    | RouteExport => HttpExport | RouteLock => HttpLock | _ => HttpReset end)
+  end.
+
+body_framing (post : bool) (route : owner_http_route) (lines : list bytes)
+    (body : bytes) : owner_http_result :=
+  match header_values (bytes_of_string "transfer-encoding") lines with
+  | _ :: _ => HttpRejected HttpTransferEncoding
+  | [] =>
+    match header_values (bytes_of_string "content-length") lines with
+    | [] => if post then HttpRejected HttpLength else command_body route body
+    | [length_text] => match canonical_decimal 6 length_text with
+      | None => HttpRejected HttpLength
+      | Some expected =>
+        let actual := N.of_nat (List.length body) in
+        if (actual <? expected)%N then HttpRejected HttpIncomplete else
+        if negb (N.eqb actual expected) then HttpRejected HttpLength else
+        command_body route body
+      end
+    | _ => HttpRejected HttpLength end
+  end.
+
+(** Limits are enforced before copying the string or scanning its framing.
+    A complete request is required in this call. It is not a stream assembler. *)
+decode_owner_http (request : string) : owner_http_result :=
+  if negb (string_within request 300000) then HttpRejected HttpTooLarge else
+  let raw := bytes_of_string request in
+  if negb (has_head_end raw) then HttpRejected HttpIncomplete else
+  let head := head_of raw in
+  if negb (list_within head 8192) then HttpRejected HttpTooLarge else
+  match lines_acc head [] with
+  | [] => HttpRejected HttpRequestLine
+  | first :: lines =>
+    if negb (headers_ok lines) then HttpRejected HttpHeaders else
+    match route_for first with
+    | None => HttpRejected HttpUnknownRoute
+    | Some (post, route) =>
+      let body := body_of raw in
+      if post then
+        match header_values (bytes_of_string "content-type") lines with
+        | [value] => if bytes_eqb (map lower value) (bytes_of_string "application/x-www-form-urlencoded")
+          then body_framing post route lines body else HttpRejected HttpContentType
+        | _ => HttpRejected HttpContentType end
+      else body_framing post route lines body
+    end
+  end.

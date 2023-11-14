@@ -867,6 +867,63 @@ Salt and nonce stay caller-supplied. Entropy-sourced salt and nonce, key-slot
 unlock, persistence and UI unlock remain unavailable. The vault protects and
 persists nothing yet.
 
+## Host-only public-fixture owner UI
+
+`scripts/run-owner` checks the repository and boots the separate owner UI image
+at port **8081**, on the same host-only isolated network as `scripts/run`.
+It starts locked, and fixture import is disabled by default. For the explicit
+public scalar-one regtest demonstration, run:
+
+```sh
+SOMA=/Users/yev/rococompute/soma/_build/install/default/bin/soma ./scripts/run-owner --public-fixture
+```
+
+The runnable image is `tests/owner_app_build.hvt`, built by the fixed check's
+tests entry point; the application code is `wallet_owner_app.soma`. `main.soma`
+and the old read-only UI remain unchanged. This is a development fixture UI,
+not a way to import actual private keys. The boot flag is never taken from an
+HTTP parameter. The browser sends no WIF/scalar and sees only public identity,
+transaction review, typed/generic rejection messages and signed PSBT bytes.
+
+One `run_owner_context` loop owns every request. `wallet_owner_http.soma` checks
+complete bounded HTTP/form framing before mapping a command to that context.
+Each tracked connection can dispatch at most one command; its request ID comes
+from the runtime connection, not request text. Pending signing completes and
+installs its state before the final public view is sent. Approval forms carry
+the exact displayed review revision, which the context rechecks; reloads,
+replacement, approval consumption and lock invalidate stale forms and exports.
+An export is a binary `signed.psbt` attachment produced by the verified owner.
+Malformed framing, duplicate fields/lengths and fragmented reads cannot dispatch
+a state-changing command. Errors do not reflect request bodies.
+
+Live in fixture mode: signer-side public-fixture import/replacement, bounded
+Base64 PSBT load, full input/output/fee review with witness-amount claim labels,
+explicit revision approval, one supported input's signing, verified download and
+lock/reset. The JSX controls reflect public owner availability, with responsive
+inline styling and no secret-entry field. Real key entry, vault unlock and
+persistence are unavailable. WASM lock does not erase immutable caller copies.
+
+Transport limits: one complete request must arrive in its first read; this
+version rejects fragmentation instead of buffering it. It supports HTTP/1.1,
+form-urlencoded POSTs, a 300000-character total request, 8192-byte headers and
+64 header lines; the decoder remains pure and is independently expectation
+checked. At most 16 newly opened connections are tracked, mailbox batches are
+capped at 64 events and runtime connection IDs above 65535 are closed. Restart
+this development image on connection exhaustion or overload. It has no user
+identity/authentication, CSRF protection, TLS or cross-restart approval token;
+revision checks are freshness checks within one isolated fixture boot. Do not
+expose it beyond the host-only development network or use real funds/keys.
+
+`tests/test_owner_app_http.py` boots default and explicit-fixture modes, checks
+actual HTTP/JSX owner state, rejects incomplete/duplicate/chunked/extra-field
+requests before dispatch, and checks stale/replayed approvals after identical
+reloads, replacement, repeated signing, export invalidation and lock/reset.
+It independently verifies the downloaded PSBT's exact map preservation, funding
+ownership, outputs/1000-satoshi fee, BIP143 digest, low-S and OpenSSL signature.
+Responses and boot logs are checked for public fixture WIF/scalar hex. Pure
+expectations cover decimal revision rendering, bounded connection tags, command
+mapping and the HTTP decoder. Existing tests are unchanged.
+
 ## Production entropy status gate (generation unavailable)
 
 `wallet_vault_entropy.soma` adds `verified_host_entropy_status` and

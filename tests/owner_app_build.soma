@@ -1,0 +1,4 @@
+Import wallet_owner_app.
+Require Import Sandbox.
+main : io unit := selectors <- args ;;
+  run_owner_app (match selectors with ["public-fixture"] => true | _ => false end).
