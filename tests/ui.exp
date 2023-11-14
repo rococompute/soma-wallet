@@ -1,0 +1,30 @@
+(** Build-failing checked expectations for tests/ui.soma. *)
+Theorem pages_for_states :
+  List.map page_for_session all_states =
+    [LockedPage, IdentityPage, ReviewPage, ApprovedPage, SigningPage, SignedPage].
+Proof. reflexivity. Qed.
+
+Theorem approval_and_lock_availability :
+  availability_of ApproveAction st_loaded = Available /\
+  availability_of ApproveAction st_locked = Unavailable "Import a key first." /\
+  availability_of ApproveAction st_imported = Unavailable "Load a PSBT first." /\
+  availability_of ApproveAction st_signing = Unavailable "Approval already consumed by a signing request." /\
+  availability_of LoadPsbtAction st_signed = Unavailable "This session is signed; lock to start again." /\
+  availability_of LockAction st_locked = Unavailable "The wallet is already locked." /\
+  availability_of LockAction st_approved = Available.
+Proof. repeat split; reflexivity. Qed.
+
+(** Signing and export stay honestly unavailable in every state until a
+    session driver connects them; nothing renders them as working. *)
+Theorem signing_never_presented_as_working :
+  List.map (action_available SignAction) all_states = [false, false, false, false, false, false] /\
+  List.map (action_available ExportAction) all_states = [false, false, false, false, false, false] /\
+  availability_of SignAction st_approved = Unavailable "Signing is not connected to this page in this build yet." /\
+  availability_of ExportAction st_signed = Unavailable "Signed-PSBT export is not connected to this page in this build yet.".
+Proof. repeat split; reflexivity. Qed.
+
+Theorem error_messages :
+  session_error_message ApprovalForDifferentPsbt = "The approval was for a different PSBT. Review and approve this one." /\
+  session_error_message ApprovalConsumed = "The approval was already used. Review and approve again." /\
+  session_error_message NoKey = "No key is imported.".
+Proof. repeat split; reflexivity. Qed.

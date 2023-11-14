@@ -1,0 +1,100 @@
+(** Pure view model for the wallet UI. It maps the session state machine
+    (wallet_session) to pages and to per-action availability, so the served
+    pages never invent their own flags. Actions whose backend is not wired
+    to a session driver in this build (signing, export) are reported
+    Unavailable with the reason, in every state: the UI must not present
+    unavailable operations as working. This bid deliberately leaves
+    main.soma's markup unchanged; the driver/page adoption is follow-up
+    work, so parallel page edits cannot break this module's checks. *)
+
+Import wallet_session.
+
+Inductive wallet_page :=
+| LockedPage
+| IdentityPage
+| ReviewPage
+| ApprovedPage
+| SigningPage
+| SignedPage.
+
+page_for_session (s : session) : wallet_page :=
+  match s with
+  | Locked => LockedPage
+  | KeyImported _ => IdentityPage
+  | PsbtLoaded _ _ => ReviewPage
+  | Approved _ _ _ => ApprovedPage
+  | Signing _ => SigningPage
+  | Signed _ => SignedPage
+  end.
+
+Inductive ui_action :=
+| ImportKeyAction
+| LoadPsbtAction
+| ApproveAction
+| SignAction
+| ExportAction
+| LockAction.
+
+Inductive availability := Available | Unavailable (reason : string).
+
+availability_of (a : ui_action) (s : session) : availability :=
+  match a with
+  | ImportKeyAction => Available
+  | LoadPsbtAction =>
+      match s with
+      | Locked => Unavailable "Import a key first."
+      | Signed _ => Unavailable "This session is signed; lock to start again."
+      | _ => Available
+      end
+  | ApproveAction =>
+      match s with
+      | PsbtLoaded _ _ => Available
+      | Locked => Unavailable "Import a key first."
+      | KeyImported _ => Unavailable "Load a PSBT first."
+      | Approved _ _ _ => Unavailable "Already approved; load a PSBT to change it."
+      | Signing _ => Unavailable "Approval already consumed by a signing request."
+      | Signed _ => Unavailable "This session is signed; lock to start again."
+      end
+  | SignAction =>
+      match s with
+      | Approved _ _ _ => Unavailable "Signing is not connected to this page in this build yet."
+      | Signing _ => Unavailable "Signing is not connected to this page in this build yet."
+      | _ => Unavailable "Review and approve the exact PSBT first."
+      end
+  | ExportAction =>
+      match s with
+      | Signed _ => Unavailable "Signed-PSBT export is not connected to this page in this build yet."
+      | _ => Unavailable "Nothing has been signed in this session."
+      end
+  | LockAction =>
+      match s with
+      | Locked => Unavailable "The wallet is already locked."
+      | _ => Available
+      end
+  end.
+
+action_available (a : ui_action) (s : session) : bool :=
+  match availability_of a s with Available => true | Unavailable _ => false end.
+
+(** One honest status line for the current state. *)
+status_line (s : session) : string :=
+  match s with
+  | Locked => "Wallet locked. No key is imported."
+  | KeyImported _ => "Key imported. Its public identity is shown; load a PSBT to review it."
+  | PsbtLoaded _ _ => "PSBT loaded. Review every output and the fee before approving."
+  | Approved _ _ _ => "Approved for signing. The approval covers only the reviewed PSBT."
+  | Signing _ => "Signing requested. The one-shot approval has been consumed."
+  | Signed _ => "Signed. Lock the wallet to start a new session."
+  end.
+
+session_error_message (e : session_error) : string :=
+  match e with
+  | NoKey => "No key is imported."
+  | NoPsbt => "No PSBT is loaded."
+  | NotApproved => "This PSBT has not been approved."
+  | ApprovalForDifferentPsbt => "The approval was for a different PSBT. Review and approve this one."
+  | ApprovalConsumed => "The approval was already used. Review and approve again."
+  | AlreadySigned => "This session is already signed; lock to start again."
+  | SignNotRequested => "Signing was not requested for this session."
+  | SignedForDifferentPsbt => "The signed result was for a different PSBT."
+  end.

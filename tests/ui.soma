@@ -1,0 +1,14 @@
+Import wallet_session.
+Import wallet_ui.
+
+key_a : key_ref := KeyRef 1.
+psbt_a : psbt_ref := ParsedPsbtRef 10 "fixture-a".
+output_a : signed_psbt_ref := SignedPsbtRef 20 psbt_a.
+
+st_locked : session := Locked.
+st_imported : session := KeyImported key_a.
+st_loaded : session := PsbtLoaded key_a psbt_a.
+st_approved : session := Approved key_a psbt_a (ApprovalFor psbt_a).
+st_signing : session := Signing (SignPermission key_a psbt_a).
+st_signed : session := Signed output_a.
+all_states : list session := [st_locked, st_imported, st_loaded, st_approved, st_signing, st_signed].

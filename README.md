@@ -111,6 +111,20 @@ and `parse_tx` find their 100000-element bound by a walk of at most that length
 before any full scan. Not yet: BIP 371 control-block lengths and cross-checking
 non-witness UTXOs against their outpoints.
 
+## Wallet UI view model
+
+`wallet_ui.soma` is the pure view model for the wallet pages: it maps each
+`wallet_session` state to a page (locked, identity, review, approved,
+signing, signed) and to per-action availability with honest reasons
+(checked in `tests/ui.soma`/`.exp`). Key import, PSBT load and approval
+become available only in the states the session model allows; signing and
+signed-PSBT export are reported unavailable with their reason in every
+state until a session driver connects them, so no page built on this
+model can present an unconnected operation as working. Session errors
+have user-facing messages here. `main.soma` still serves its locked page
+unchanged in this step; adopting the model in the served markup and
+wiring page actions to the driver remain follow-up work.
+
 ## Development
 
 Requires the existing local Soma checkout/toolchain, opam switch `hvf` with the
