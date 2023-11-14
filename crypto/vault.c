@@ -121,7 +121,7 @@ EXPORT(vault_locked)(unsigned token) {
  * associated data. Salt and nonce are CALLER-SUPPLIED in this step: nothing
  * here generates randomness. The 64 MiB Argon2 workspace is obtained with
  * memory.grow on first use (so SWVT users keep the small initial memory) and is
- * wiped after every KDF. Slots: password=0, key=1, envelope=2 (salt at 24 and
+ * wiped after every KDF by the pinned library itself (see p_kdf). Slots: password=0, key=1, envelope=2 (salt at 24 and
  * nonce at 40 for sealing, all 112 bytes for opening). Status codes as above. */
 #define P_HEADER 64
 #define P_ENVELOPE 112
@@ -134,6 +134,10 @@ static uint8_t p_password[128], p_secret[32], p_envelope[P_ENVELOPE], p_plain[32
 static uint8_t p_seen_password[128], p_seen_secret[32], p_seen_envelope[P_ENVELOPE];
 static unsigned p_pass_length, p_begun, p_have_envelope, p_have_plain;
 static uint8_t *p_work;   /* 64 MiB, grown once */
+/* Private: 1 from before Argon2 starts until its guaranteed wipe has returned.
+ * Fresh memory.grow pages are zero (WASM spec), so a new workspace is clean.
+ * Any dirty workspace (e.g. an interrupted KDF) is still swept by prod_wipe. */
+static unsigned p_work_dirty;
 static void prod_wipe(void) {
     crypto_wipe(p_password,sizeof(p_password)); crypto_wipe(p_secret,sizeof(p_secret));
     crypto_wipe(p_envelope,sizeof(p_envelope)); crypto_wipe(p_plain,sizeof(p_plain));
@@ -141,7 +145,7 @@ static void prod_wipe(void) {
     crypto_wipe(p_seen_password,sizeof(p_seen_password));
     crypto_wipe(p_seen_secret,sizeof(p_seen_secret));
     crypto_wipe(p_seen_envelope,sizeof(p_seen_envelope));
-    if (p_work) crypto_wipe(p_work,(size_t)P_BLOCKS*1024);
+    if (p_work && p_work_dirty) { crypto_wipe(p_work,(size_t)P_BLOCKS*1024); p_work_dirty=0; }
     p_pass_length=p_begun=p_have_envelope=p_have_plain=0;
 }
 static unsigned p_fail(unsigned code) { prod_wipe(); return code; }
@@ -154,8 +158,13 @@ static int p_workspace(void) {
 static void p_kdf(void) {
     crypto_argon2_config config={CRYPTO_ARGON2_ID,P_BLOCKS,P_PASSES,P_LANES};
     crypto_argon2_inputs inputs={p_password,p_envelope+24,p_pass_length,16};
+    p_work_dirty=1;
     crypto_argon2(p_derived,32,p_work,config,inputs,crypto_argon2_no_extras);
-    crypto_wipe(p_work,(size_t)P_BLOCKS*1024);
+    /* Pinned Monocypher 4.0.3 crypto_argon2 ends with a volatile ZERO of
+     * 128*nb_blocks u64 words of work_area (= P_BLOCKS*1024 bytes, the whole
+     * workspace) before returning, so a second full sweep here is redundant.
+     * tests/vault-workspace-check.mjs inspects the actual memory region. */
+    p_work_dirty=0;
 }
 EXPORT(vault_prod_begin)(unsigned length) {
     prod_wipe();

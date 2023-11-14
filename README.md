@@ -232,7 +232,17 @@ associated data, producing or opening the 112-byte envelope. Open compares the
 24 framing/profile header bytes before growing the workspace or running the
 KDF, so SWVT bytes, unknown versions and weak or excessive costs never reach
 Argon2. The 64 MiB Argon2 workspace comes from `memory.grow` on first use, so
-SWVT users keep the small initial memory. It is wiped after every KDF, and all
+SWVT users keep the small initial memory. It is wiped after every KDF by the
+pinned Monocypher 4.0.3 `crypto_argon2` itself, which ends with a volatile zero
+of `128 * nb_blocks` words, exactly the whole 64 MiB area. The wrapper's two
+extra full sweeps per seal/open were therefore redundant. A private
+`p_work_dirty` flag is set before Argon2 starts and cleared only after that
+library wipe has returned, so `prod_wipe`/`vault_lock` still sweep a workspace
+that is dirty (for example after an interrupted KDF). Freshly grown WASM pages
+are zero. `tests/vault-workspace-check.mjs` scans the actual grown memory region,
+not the boolean audit, after successful seal/open, wrong passphrase, tamper,
+framing/staging failures and lock. This saves two 64 MiB sweeps per KDF but has
+not been measured against the booted 240 s blocker below, which remains. All
 staged passwords, keys, derived keys and outputs are wiped on success and
 failure. `vault_lock` now also erases the production state. Salt and nonce are
 caller-supplied: nothing here generates randomness.
