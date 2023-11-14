@@ -979,3 +979,55 @@ and 24-byte nonce. No production generation is live, and nothing feeds invented
 values into the existing KDF-gated adapter. Practical production KDF execution,
 key-slot unlock/lock lifecycle, encrypted persistence/restart tests and UI unlock
 remain unavailable. WASM wiping cannot erase immutable copies held by callers.
+
+## Serialized production-vault unlock-attempt lifecycle
+
+The existing authoritative `wallet_sign_owner.soma` now accepts the signer-local
+`OwnerUnlock passphrase envelope` command. It is not an HTTP route: the existing
+owner/context function signatures and fixture UI are preserved, and no browser
+passphrase, decrypted key or caller-supplied success/plaintext hook is added.
+
+Acceptance returns a private `OwnerVaultUnlock` job in an owner whose policy is
+already `Locked`, with identity, source PSBT, approval, signed export and old
+pending permission references removed. That state is installed by the existing
+Sandbox loop before the next iteration runs any unlock IO. No old Approved
+snapshot survives. The job first erases the retained key slot and both SWVT/SWVP
+vault domains, then invokes only the normal `wallet_vault_prod.open_production`
+entry point. Its bounded passphrase/octet and canonical SWVP validation remain
+mandatory; SWVT and unsupported profiles are rejected before KDF execution.
+
+While the existing KDF gate is closed, a canonical envelope returns
+`OwnerVaultError ProdKdfUnavailable` and the owner remains locked. Malformed,
+oversized, invalid-octet and policy failures likewise leave no owner references.
+After evaluating the adapter result, final cleanup again attempts the key slot
+and global vault lock; any cleanup failure replaces the result. Both domains
+are attempted even when the first cleanup reports failure. Existing startup,
+lock/reset/stop and fatal transient-cleanup paths now also erase both vault
+domains together with the key slot. Normal signing still installs Signing before
+key IO and completes pending work before accepting another command.
+
+Successful authenticated unlock-to-slot is deliberately unimplemented. Even if
+a future adapter returns an opened key, this boundary rejects with
+`OwnerVaultKeyImportUnavailable`, clears WASM, abandons the immutable result and
+publishes no plaintext. It does not claim to erase immutable passphrase/key
+copies held by callers or the runtime. It introduces no entropy fallback, native
+binding, KDF bypass, persistence or UI unlock.
+
+`tests/owner_vault_policy.soma/.exp` prove that accepting unlock is a pure return
+of the empty-owner job state, with no callback or key IO, and check canonical,
+oversized and large-binary-N input policy. `tests/runtime_owner_vault.soma` drives
+one actual owner through public-fixture import, review/approval, signing and an
+export, followed by malformed and canonical-but-unavailable unlock attempts.
+It also covers oversized passwords/envelopes, 2^128 password octets, bad envelope
+octets, SWVT and weak-policy envelopes, plus explicit lock/reset. Each attempt
+starts with dirty legacy staging, then production staging, and live slot staging.
+Typed rejection events require both vault audits/readers and the key-slot audits
+clear, and all earlier handles must refuse staging/signing. Subsequent approve,
+sign, export and load commands must fail until a fresh import. The exported PSBT
+before the first attempt is public, parsed and never printed. New Python checks
+validate the exact event order and forbid fixture WIF/scalar or plaintext logs.
+
+This completes a live fail-closed lifecycle boundary, not the vault plan item.
+Practical production KDF/entropy, successful authenticated unlock and retained-key
+installation, encrypted persistence with actual restart tests, secure signer-side
+key entry and UI unlock remain future work. Persistence remains disabled.

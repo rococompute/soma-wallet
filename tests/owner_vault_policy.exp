@@ -1,0 +1,14 @@
+Theorem unlock_acceptance_installs_empty_owner : forall state passphrase envelope emit,
+  owner_command_step state (OwnerUnlock passphrase envelope) emit = ret (queue_owner_unlock passphrase envelope).
+Proof. intros. destruct state. reflexivity. Qed.
+Theorem queued_unlock_contains_no_prior_references : forall passphrase envelope,
+  queue_owner_unlock passphrase envelope =
+  OwnerState Locked None None None (Some (OwnerVaultUnlock passphrase envelope)).
+Proof. intros. reflexivity. Qed.
+Theorem canonical_and_bounded_unlock_policy :
+  open_input_error pass fixture = None /\
+  open_input_error pass [] = Some (ProdFormat FormatTruncated) /\
+  open_input_error huge_pass fixture = Some ProdPassphraseLength /\
+  open_input_error (List.repeat 7%N 129%nat) fixture = Some ProdPassphraseLength /\
+  open_input_error pass (fixture ++ [0]) = Some (ProdFormat FormatTooLong).
+Proof. vm_compute. repeat split; reflexivity. Qed.

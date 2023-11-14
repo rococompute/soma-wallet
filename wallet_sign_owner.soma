@@ -3,6 +3,8 @@
     observers receive public events only. Run exactly one owner per WASM slot. *)
 Import wallet_psbt wallet_keys wallet_session wallet_signing_prepare.
 Import wallet_partial_export wallet_key_runtime wallet_key_slot crypto.key_slot.
+Import wallet_vault_prod.
+Import crypto.vault.
 Require Import Sandbox Crypto.
 
 Inductive owner_command :=
@@ -11,6 +13,7 @@ Inductive owner_command :=
 | OwnerApprove
 | OwnerSign (index : nat)
 | OwnerExport
+| OwnerUnlock (passphrase : list N) (envelope : bytes)
 | OwnerLock
 | OwnerReset
 | OwnerStop.
@@ -21,7 +24,10 @@ Inductive owner_error :=
 | OwnerPreparationError (error : signing_prepare_error)
 | OwnerExportError (error : partial_export_error)
 | OwnerNoExport
-| OwnerBindingError.
+| OwnerBindingError
+| OwnerVaultError (error : vault_prod_error)
+| OwnerVaultKeyImportUnavailable
+| OwnerDomainCleanup (key_error : option slot_error) (vault_status : N).
 Inductive owner_event :=
 | OwnerImported (public_id : public_identity)
 | OwnerReviewed (transaction : psbt)
@@ -38,12 +44,19 @@ Inductive owner_event :=
     No Approved snapshot survives into the pending phase. *)
 Inductive owner_work :=
 | OwnerDigest (index : nat) (digest : bytes)
-| OwnerFailure (error : owner_error).
+| OwnerFailure (error : owner_error)
+| OwnerVaultUnlock (passphrase : list N) (envelope : bytes).
 Inductive owner_state := OwnerState
   (policy : session) (identity : option slot_identity)
   (source : option (bytes * psbt_ref))
   (exported : option (bytes * string)) (work : option owner_work).
 owner_empty : owner_state := OwnerState Locked None None None None.
+(** Installing this state discards ALL old key, approval, PSBT/export and
+    pending-sign references before any unlock IO. The inputs are retained by
+    reference only; validation/traversal happens after erasure in owner_finish. *)
+queue_owner_unlock (passphrase : list N) (envelope : bytes) : owner_state :=
+  OwnerState Locked None None None (Some (OwnerVaultUnlock passphrase envelope)).
+
 owner_key_ref (id : slot_identity) : key_ref :=
   match id with SlotIdentity (KeySlotHandle g) _ => KeyRef (N.to_nat g) end.
 owner_public (id : slot_identity) : public_identity :=
@@ -53,24 +66,55 @@ owner_bound (policy : session) (id : slot_identity) : bool :=
   | Some (KeyRef a), KeyRef b => Nat.eqb a b
   | _, _ => false end.
 
+(** Always attempt BOTH domains, even if the first cleanup reports failure.
+    Return no owner references on failure; a cleanup error replaces any result. *)
+erase_owner_domains (token : unit) : option owner_error :=
+  match lock_key_slot tt with
+  | SlotOk _ => let code := vault_lock 0 in
+    if N.eqb code 1 then None else Some (OwnerDomainCleanup None code)
+  | SlotError error => let code := vault_lock 0 in
+    if N.eqb code 1 then Some (OwnerKeyError error)
+    else Some (OwnerDomainCleanup (Some error) code)
+  end.
 owner_clear (state : owner_state) (event : owner_event)
     (emit : owner_event -> io unit) : io owner_state :=
   match slot_status (slot_clear_transient 0) with
-  | SlotError e =>
-    match lock_key_slot tt with
-    | SlotError fatal => emit (OwnerRejected (OwnerKeyError fatal)) ;; ret owner_empty
-    | SlotOk _ => emit (OwnerRejected (OwnerKeyError e)) ;; ret owner_empty end
+  | SlotError e => match erase_owner_domains tt with
+    | Some error => emit (OwnerRejected error) ;; ret owner_empty
+    | None => emit (OwnerRejected (OwnerKeyError e)) ;; ret owner_empty end
   | SlotOk _ => emit event ;; ret state end.
 owner_erase (emit : owner_event -> io unit) : io owner_state :=
-  match lock_key_slot tt with
-  | SlotError e => emit (OwnerRejected (OwnerKeyError e)) ;; ret owner_empty
-  | SlotOk _ => emit OwnerLocked ;; ret owner_empty end.
+  match erase_owner_domains tt with
+  | Some error => emit (OwnerRejected error) ;; ret owner_empty
+  | None => emit OwnerLocked ;; ret owner_empty end.
+
+finish_owner_unlock (error : owner_error) (emit : owner_event -> io unit) : io owner_state :=
+  match erase_owner_domains tt with
+  | Some cleanup_error => emit (OwnerRejected cleanup_error) ;; ret owner_empty
+  | None => emit (OwnerRejected error) ;; ret owner_empty end.
+owner_unlock_attempt (passphrase : list N) (envelope : bytes)
+    (emit : owner_event -> io unit) : io owner_state :=
+  (** The loop has ALREADY installed queue_owner_unlock. Erase retained key
+      and both vault domains before the normal bounded/canonical SWVP adapter. *)
+  match erase_owner_domains tt with
+  | Some error => emit (OwnerRejected error) ;; ret owner_empty
+  | None => match open_production passphrase envelope with
+    | ProdError error => finish_owner_unlock (OwnerVaultError error) emit
+    | ProdOk _ =>
+      (** No successful-unlock path is connected. Even if the KDF gate is
+          later enabled, do not import or publish this immutable secret copy. *)
+      finish_owner_unlock OwnerVaultKeyImportUnavailable emit
+    end
+  end.
 
 (** This continuation is run only by the NEXT iterate step. At this point
     the loop has installed Signing and has discarded approval and old export. *)
 owner_finish (policy : session) (id : option slot_identity)
     (source : option (bytes * psbt_ref)) (work : owner_work)
     (emit : owner_event -> io unit) : io owner_state :=
+  match work with
+  | OwnerVaultUnlock passphrase envelope => owner_unlock_attempt passphrase envelope emit
+  | _ =>
   let failed := OwnerState policy id source None None in
   match work, id, source with
   | OwnerFailure e, _, _ => owner_clear failed (OwnerRejected e) emit
@@ -93,12 +137,14 @@ owner_finish (policy : session) (id : option slot_identity)
         end
       end
     | _ => owner_clear failed (OwnerRejected OwnerBindingError) emit end
-  | _, _, _ => owner_clear failed (OwnerRejected OwnerBindingError) emit end.
+  | _, _, _ => owner_clear failed (OwnerRejected OwnerBindingError) emit end
+  end.
 
 owner_command_step (state : owner_state) (command : owner_command)
     (emit : owner_event -> io unit) : io owner_state :=
   match state with OwnerState policy id source exported _ =>
   match command with
+  | OwnerUnlock passphrase envelope => ret (queue_owner_unlock passphrase envelope)
   | OwnerImport wif =>
     (** Import invalidates all references even on malformed replacement. *)
     match import_slot_wif Regtest wif with

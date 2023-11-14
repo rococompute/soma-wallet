@@ -1,0 +1,12 @@
+Import wallet_psbt.
+Import wallet_session.
+Import wallet_sign_owner.
+Import wallet_vault_prod.
+Import wallet_vault_format.
+Import tests.vault_format.
+Require Import Sandbox Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+pass : list N := [112%N,117%N,98%N].
+huge_pass : list N := [340282366920938463463374607431768211456%N].
+main : io unit := ret tt.

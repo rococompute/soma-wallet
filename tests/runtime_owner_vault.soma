@@ -1,0 +1,94 @@
+Import wallet_psbt.
+Import wallet_keys.
+Import wallet_session.
+Import wallet_key_slot.
+Import wallet_sign_owner.
+Import wallet_vault_prod.
+Import wallet_vault_format.
+Import tests.keys.
+Import tests.sign_driver_fixture.
+Import tests.vault_format.
+Import crypto.key_slot.
+Import crypto.vault.
+Require Import Sandbox Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+pass : list N := [112%N,117%N,98%N].
+(** Legacy first: vault_begin clears production too. Fresh functions ensure
+    every scenario really dirties BOTH domains and live slot staging. *)
+prime (token : unit) : bool :=
+  if negb (N.eqb (vault_begin 3) 1) then false else
+  if negb (N.eqb (vault_put 0 0 112) 1) then false else
+  if negb (N.eqb (vault_put 1 31 1) 1) then false else
+  if negb (N.eqb (vault_prod_begin 3) 1) then false else
+  if negb (N.eqb (vault_prod_put 0 0 112) 1) then false else
+  if negb (N.eqb (vault_prod_put 1 31 1) 1) then false else
+  if negb (N.eqb (slot_begin_digest (slot_handle 0) 32) 1) then false else
+  if negb (N.eqb (slot_digest_byte 0 1) 1) then false else
+  andb (N.eqb (vault_inputs_cleared 0) 0)
+    (andb (N.eqb (vault_prod_cleared 0) 0) (N.eqb (slot_inputs_cleared 0) 0)).
+all_clear (token : unit) : bool :=
+  andb (N.eqb (slot_locked 0) 1)
+  (andb (N.eqb (slot_handle 0) 0)
+  (andb (N.eqb (slot_public_byte 0) 256)
+  (andb (N.eqb (slot_der_size 0) 256)
+  (andb (N.eqb (vault_locked 0) 1)
+  (andb (N.eqb (vault_prod_cleared 0) 1)
+  (andb (N.eqb (vault_envelope_byte 0) 256)
+  (andb (N.eqb (vault_opened_byte 0) 256)
+  (andb (N.eqb (vault_prod_envelope_byte 0) 256) (N.eqb (vault_prod_opened_byte 0) 256))))))))).
+stale_handles (token : unit) : bool :=
+  forallb (fun h => if N.eqb (slot_begin_digest (N.of_nat h) 32) 10 then
+    N.eqb (slot_sign (N.of_nat h)) 10 else false) (List.seq 1%nat 12%nat).
+locked_event (token : unit) : bool := andb (all_clear tt) (andb (stale_handles tt) (all_clear tt)).
+
+imported : owner_command := OwnerImport (string_of_bytes wif_testnet).
+review_approve : list owner_command := [imported, OwnerLoad fixture_raw, OwnerApprove].
+no_old_state : list owner_command := [OwnerApprove, OwnerSign 0%nat, OwnerExport, OwnerLoad fixture_raw].
+attempt (p : list N) (raw : bytes) : list owner_command :=
+  review_approve ++ [OwnerUnlock p raw] ++ no_old_state.
+commands : list owner_command :=
+  review_approve ++ [OwnerSign 0%nat, OwnerExport, OwnerUnlock pass []] ++ no_old_state ++
+  attempt pass fixture ++
+  attempt (List.repeat 7%N 129%nat) fixture ++
+  attempt [340282366920938463463374607431768211456%N] fixture ++
+  attempt pass (fixture ++ [0]) ++
+  attempt pass (999 :: List.skipn 1 fixture) ++
+  attempt pass ([83,87,86,84] ++ List.skipn 4 fixture) ++
+  attempt pass (replace_word 12%nat 4%nat 64 fixture) ++
+  review_approve ++ [OwnerLock] ++ no_old_state ++
+  review_approve ++ [OwnerReset] ++ no_old_state.
+next (remaining : list owner_command) : io (owner_command * list owner_command) :=
+  match remaining with [] => ret (OwnerStop, []) | command :: rest => ret (command, rest) end.
+emit (event : owner_event) : io unit :=
+  match event with
+  | OwnerImported _ => print "LIFE: imported"
+  | OwnerReviewed _ => print "LIFE: reviewed"
+  | OwnerApproved => if prime tt then print "LIFE: approved-dirty" else exit 10
+  | OwnerPending => if N.eqb (slot_inputs_cleared 0) 0 then print "LIFE: pending" else exit 11
+  | OwnerSigned => print "LIFE: signed"
+  | OwnerExported raw _ => match parse_psbt raw with
+    | Fail _ => exit 12
+    | Done _ => print "LIFE: export-before-unlock" end
+  | OwnerLocked => if locked_event tt then print "LIFE: locked" else exit 13
+  | OwnerStopped => if locked_event tt then
+      print "PASS: live owner unlock invalidation, stale handles, dual vault cleanup, lock/reset, canonical unavailable and bounded failures"
+      else exit 14
+  | OwnerRejected error =>
+    if negb (locked_event tt) then exit 15 else
+    match error with
+    | OwnerVaultError (ProdFormat FormatTruncated) => print "LIFE: malformed"
+    | OwnerVaultError ProdKdfUnavailable => print "LIFE: kdf-unavailable"
+    | OwnerVaultError ProdPassphraseLength => print "LIFE: pass-rejected"
+    | OwnerVaultError (ProdFormat FormatTooLong) => print "LIFE: oversized"
+    | OwnerVaultError (ProdFormat FormatByteOutOfRange) => print "LIFE: byte-rejected"
+    | OwnerVaultError (ProdFormat FormatTestEnvelope) => print "LIFE: swvt-rejected"
+    | OwnerVaultError (ProdFormat FormatWeakMemory) => print "LIFE: policy-rejected"
+    | OwnerSessionError NoPsbt => print "LIFE: no-psbt"
+    | OwnerSessionError NoKey => print "LIFE: no-key"
+    | OwnerNoExport => print "LIFE: no-export"
+    | _ => exit 16 end
+  end.
+main : io unit := selectors <- args ;;
+  match selectors with ["public-lifecycle"] => run_sign_owner next commands emit | _ => exit 1 end.
