@@ -1,0 +1,114 @@
+(** Handle-only approved PSBT signing over the retained key slot.
+    The key is imported once (import_slot_wif); this composition never takes,
+    decodes or derives a WIF. The session's key_ref must name the live slot
+    generation, and the public identity used for ownership, digest preparation
+    and the inserted partial signature comes from the imported SlotIdentity.
+    This is NOT an authoritative session owner: the caller still threads one
+    session value, must install every returned state, and must not replay
+    immutable earlier states. store_pending is a trusted callback contract. *)
+Import wallet_psbt wallet_keys wallet_session wallet_signing_prepare.
+Import wallet_partial_export wallet_key_runtime wallet_key_slot crypto.key_slot.
+Require Import Sandbox Crypto.
+
+Inductive slot_psbt_error :=
+| SlotPsbtPreparation (error : signing_prepare_error)
+| SlotPsbtKey (error : slot_error)
+| SlotPsbtKeyRefMismatch
+| SlotPsbtInvalidIdentity
+| SlotPsbtPendingStoreFailed
+| SlotPsbtExport (error : partial_export_error)
+| SlotPsbtCompletion (error : session_error)
+| SlotPsbtLockFailed (error : slot_error).
+Inductive slot_psbt_result :=
+| SlotPsbtSigned (next : session) (serialized : bytes) (base64_text : string)
+| SlotPsbtRejected (next : session) (error : slot_psbt_error).
+slot_psbt_next (result : slot_psbt_result) : session :=
+  match result with SlotPsbtSigned next _ _ | SlotPsbtRejected next _ => next end.
+
+(** The session-level key reference for a slot generation. The binary N is
+    range-checked (1..65535, slot_handle_valid) BEFORE any unary conversion,
+    so a forged huge generation cannot force an unbounded nat allocation. *)
+slot_key_ref (imported : slot_identity) : option key_ref :=
+  match imported with SlotIdentity (KeySlotHandle g) _ =>
+    if slot_handle_valid g then Some (KeyRef (N.to_nat g)) else None end.
+slot_identity_valid (imported : slot_identity) : bool :=
+  match imported with SlotIdentity (KeySlotHandle g) _ => slot_handle_valid g end.
+slot_public_id (imported : slot_identity) : public_identity :=
+  match imported with SlotIdentity _ id => id end.
+key_ref_eqb (a b : key_ref) : bool := match a, b with KeyRef x, KeyRef y => Nat.eqb x y end.
+bound_to_slot (state : session) (imported : slot_identity) : bool :=
+  match active_key state, slot_key_ref imported with
+  | Some k, Some r => key_ref_eqb k r
+  | _, _ => false
+  end.
+
+(** Start a session for a freshly imported slot identity; None for an
+    out-of-range generation. *)
+slot_session (imported : slot_identity) : option session :=
+  match slot_key_ref imported with Some r => Some (KeyImported r) | None => None end.
+
+(** Lock: erase the WASM slot and return the Locked state the caller must
+    install. Every earlier handle, approval and export reference is dropped. *)
+lock_slot_session (token : unit) : slot_psbt_result :=
+  match lock_key_slot tt with
+  | SlotOk _ => SlotPsbtRejected Locked (SlotPsbtCompletion NoKey)
+  | SlotError e => SlotPsbtRejected Locked (SlotPsbtLockFailed e)
+  end.
+lock_succeeded (result : slot_psbt_result) : bool :=
+  match result with SlotPsbtRejected Locked (SlotPsbtCompletion NoKey) => true | _ => false end.
+
+slot_sign_prepared (pending : session) (raw : bytes) (imported : slot_identity)
+    (index : nat) (digest : bytes) : slot_psbt_result :=
+  match sign_slot imported digest with
+  | SlotError e => SlotPsbtRejected pending (SlotPsbtKey e)
+  | SlotOk (SlotSignature _ der) =>
+    match insert_partial_candidate raw (slot_public_id imported) index der with
+    | CandidateRejected e => SlotPsbtRejected pending (SlotPsbtExport e)
+    | Candidate (PartialCandidate serialized text) =>
+      match pending with
+      | Signing (SignPermission _ source) =>
+        match complete_sign pending (SignedPsbtRef 0 source) with
+        | Err e => SlotPsbtRejected pending (SlotPsbtCompletion e)
+        | Ok next => SlotPsbtSigned next serialized text
+        end
+      | _ => SlotPsbtRejected pending (SlotPsbtCompletion SignNotRequested)
+      end
+    end
+  end.
+
+(** Every exit clears slot staging and public outputs (never the retained
+    key); a cleanup failure replaces the result with a rejection. *)
+finish_slot_psbt (result : slot_psbt_result) : slot_psbt_result :=
+  match slot_status (slot_clear_transient 0) with
+  | SlotOk _ => result
+  | SlotError e => SlotPsbtRejected (slot_psbt_next result) (SlotPsbtKey e)
+  end.
+
+(** Continuation after the pending state was saved. *)
+slot_sign_after_pending (state pending : session) (raw : bytes)
+    (imported : slot_identity) (index : nat) : slot_psbt_result :=
+  if negb (bound_to_slot pending imported) then SlotPsbtRejected pending SlotPsbtKeyRefMismatch else
+  match prepare_signing state raw (slot_public_id imported) index with
+  | PreparationFailed e => SlotPsbtRejected pending (SlotPsbtPreparation e)
+  | Prepared (SigningPreparation _ _ _ _ digest) =>
+    slot_sign_prepared pending raw imported index digest
+  end.
+
+(** store_pending must install pending in ONE authoritative state and return
+    true only after doing so; it runs before any slot IO. An out-of-range
+    identity is refused first (no hook, approval untouched). A false result
+    cannot sign. Any sign attempt that reaches the hook consumes the approval,
+    including a key-reference mismatch. Every exit clears slot staging and
+    public outputs; the retained key stays until lock_slot_session. *)
+sign_reviewed_slot (store_pending : session -> io bool) (state : session)
+    (raw : bytes) (imported : slot_identity) (index : nat) : io slot_psbt_result :=
+  if negb (slot_identity_valid imported)
+  then ret (finish_slot_psbt (SlotPsbtRejected state SlotPsbtInvalidIdentity)) else
+  match sign_request state with
+  | Err e => ret (finish_slot_psbt
+      (SlotPsbtRejected state (SlotPsbtPreparation (SigningSessionError e))))
+  | Ok pending =>
+    saved <- store_pending pending ;;
+    if saved then ret (finish_slot_psbt (slot_sign_after_pending state pending raw imported index))
+    else ret (finish_slot_psbt (SlotPsbtRejected pending SlotPsbtPendingStoreFailed))
+  end.

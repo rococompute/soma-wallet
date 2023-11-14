@@ -1,0 +1,140 @@
+Import wallet_psbt wallet_keys wallet_session wallet_key_runtime wallet_key_slot crypto.key_slot.
+Import wallet_slot_sign_runtime wallet_signing_prepare tests.keys tests.sign_driver_fixture.
+Require Import Sandbox Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** Booted handle-only signing. The public scalar-one WIF is selected from
+    args and imported ONCE; every signature below goes through its handle.
+    The public scalar-two WIF is used only for the replacement check. *)
+scalar_two_wif : string := "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87K7XCyj5v".
+source : psbt_ref := match reference_for 7%nat fixture_raw with
+  Done value => value | Fail _ => ParsedPsbtRef 7%nat "invalid" end.
+other_raw : bytes := firstn (Nat.sub (List.length fixture_raw) 2) fixture_raw ++ [222,0].
+state_of (r : transition_result) : session := match r with Ok next => next | Err _ => Locked end.
+
+slot_empty (token : unit) : bool :=
+  andb (N.eqb (slot_inputs_cleared 0) 1)
+    (andb (N.eqb (slot_public_byte 0) 256) (N.eqb (slot_der_size 0) 256)).
+(** Stage one digest byte so the hook can observe that no slot IO ran yet. *)
+dirty_slot (imported : slot_identity) : bool :=
+  match imported with SlotIdentity (KeySlotHandle h) _ =>
+    if N.eqb (slot_begin_digest h 32) 1 then
+      andb (N.eqb (slot_digest_byte 0 1) 1) (N.eqb (slot_inputs_cleared 0) 0)
+    else false
+  end.
+
+record_pending (pending : session) : io bool :=
+  match pending with
+  | Signing (SignPermission _ bound) =>
+    if andb (same_psbt source bound) (N.eqb (slot_inputs_cleared 0) 0) then
+      print "PENDING_HOOK_BEFORE_SLOT" ;; ret true
+    else ret false
+  | _ => ret false end.
+accept_pending (pending : session) : io bool :=
+  match pending with Signing (SignPermission _ bound) => ret (same_psbt source bound) | _ => ret false end.
+unexpected_hook (pending : session) : io bool := exit 42.
+failed_store (pending : session) : io bool := ret false.
+
+consumed_after (next : session) (imported : slot_identity) : io bool :=
+  r <- sign_reviewed_slot unexpected_hook next fixture_raw imported 0%nat ;;
+  ret (match r with
+  | SlotPsbtRejected _ (SlotPsbtPreparation (SigningSessionError ApprovalConsumed)) => slot_empty tt
+  | _ => false end).
+
+expect (r : slot_psbt_result) (tag : nat) : bool :=
+  match r, tag with
+  | SlotPsbtRejected _ (SlotPsbtPreparation (SigningSessionError NotApproved)), O => true
+  | SlotPsbtRejected _ (SlotPsbtPreparation (SigningSessionError ApprovalConsumed)), S O => true
+  | SlotPsbtRejected _ SlotPsbtKeyRefMismatch, S (S O) => true
+  | SlotPsbtRejected _ (SlotPsbtPreparation (SigningSessionError ApprovalForDifferentPsbt)), S (S (S O)) => true
+  | SlotPsbtRejected _ SlotPsbtPendingStoreFailed, S (S (S (S O))) => true
+  | SlotPsbtRejected _ (SlotPsbtKey SlotStaleHandle), S (S (S (S (S O)))) => true
+  | SlotPsbtRejected _ SlotPsbtInvalidIdentity, S (S (S (S (S (S O))))) => true
+  | _, _ => false end.
+
+(** Negative command: dirty staging first (when a live handle exists), run,
+    require the expected error and clean slot staging/outputs. Tags 2..4
+    reach the hook, so the approval must then be consumed. *)
+negative (hook : session -> io bool) (state : session) (raw : bytes)
+    (imported : slot_identity) (dirty : bool) (tag : nat) : io bool :=
+  if andb dirty (negb (dirty_slot imported)) then ret false else
+  r <- sign_reviewed_slot hook state raw imported 0%nat ;;
+  if andb (expect r tag) (slot_empty tt) then
+    match tag with
+    | S (S (S (S (S _)))) | O | S O => ret true
+    | _ => consumed_after (slot_psbt_next r) imported
+    end
+  else ret false.
+
+export_roundtrip (raw : bytes) : bool :=
+  match parse_psbt raw with Fail _ => false | Done p => bytes_eqb (serialize_psbt p) raw end.
+
+forged (h : slot_identity) (offset : N) (absolute : bool) : slot_identity :=
+  match h with SlotIdentity (KeySlotHandle g) id =>
+    SlotIdentity (KeySlotHandle (if absolute then offset else (g + offset)%N)) id end.
+(** Out-of-range generations: refused before any conversion, hook or slot IO,
+    staging cleaned, no signed output, and slot_session yields None. *)
+invalid_identities (approved : session) (h1 : slot_identity) : io bool :=
+  let ids := [forged h1 0%N true, forged h1 65536%N true, forged h1 4294967296%N false] in
+  let no_session := forallb (fun i => match slot_session i with None => true | Some _ => false end) ids in
+  a <- negative unexpected_hook approved fixture_raw (List.nth 0 ids h1) false 6%nat ;;
+  b <- negative unexpected_hook approved fixture_raw (List.nth 1 ids h1) false 6%nat ;;
+  c <- (if dirty_slot h1 then negative unexpected_hook approved fixture_raw (List.nth 2 ids h1) false 6%nat
+        else ret false) ;;
+  ret (andb no_session (andb a (andb b c))).
+
+after_lock (approved : session) (h1 : slot_identity) : io unit :=
+  if negb (lock_succeeded (lock_slot_session tt)) then exit 20 else
+  a <- negative accept_pending approved fixture_raw h1 false 5%nat ;; if negb a then exit 21 else
+  match import_slot_wif Regtest scalar_two_wif with
+  | SlotError _ => exit 22
+  | SlotOk h2 =>
+    b <- negative accept_pending approved fixture_raw h1 false 5%nat ;; if negb b then exit 23 else
+    c <- negative accept_pending approved fixture_raw h2 false 2%nat ;; if negb c then exit 24 else
+    if negb (lock_succeeded (lock_slot_session tt)) then exit 25 else
+    if negb (andb (N.eqb (slot_locked 0) 1) (N.eqb (slot_handle 0) 0)) then exit 26 else
+    print "PASS: handle-only approved PSBT signing, approval/key/content/identity negatives, lock and replacement"
+  end.
+
+check (h1 : slot_identity) : io unit :=
+  let start := match slot_session h1 with Some s => s | None => Locked end in
+  let loaded := state_of (load_psbt start source) in
+  let approved := state_of (approve loaded source) in
+  let reloaded := state_of (load_psbt approved source) in
+  let consumed := state_of (sign_request approved) in
+  let foreign := state_of (approve (PsbtLoaded (KeyRef 65536%nat) source) source) in
+  a <- negative unexpected_hook loaded fixture_raw h1 true 0%nat ;; if negb a then exit 2 else
+  b <- negative unexpected_hook reloaded fixture_raw h1 true 0%nat ;; if negb b then exit 3 else
+  c <- negative unexpected_hook consumed fixture_raw h1 true 1%nat ;; if negb c then exit 4 else
+  d <- negative record_pending foreign fixture_raw h1 true 2%nat ;; if negb d then exit 5 else
+  e <- negative record_pending approved other_raw h1 true 3%nat ;; if negb e then exit 6 else
+  f <- negative failed_store approved fixture_raw h1 true 4%nat ;; if negb f then exit 7 else
+  g <- invalid_identities approved h1 ;; if negb g then exit 12 else
+  if negb (dirty_slot h1) then exit 8 else
+  r <- sign_reviewed_slot record_pending approved fixture_raw h1 0%nat ;;
+  match r with
+  | SlotPsbtRejected _ _ => exit 9
+  | SlotPsbtSigned next raw text =>
+    if negb (andb (match next with
+      | Signed (SignedPsbtRef _ bound) => same_psbt source bound | _ => false end)
+      (andb (slot_empty tt) (export_roundtrip raw))) then exit 10 else
+    again <- sign_reviewed_slot unexpected_hook next fixture_raw h1 0%nat ;;
+    match again with
+    | SlotPsbtRejected _ (SlotPsbtPreparation (SigningSessionError AlreadySigned)) =>
+      print (String.append "SIGNED_PSBT_HEX=" (hex_of_bytes raw)) ;;
+      print (String.append "SIGNED_PSBT_BASE64=" text) ;;
+      after_lock approved h1
+    | _ => exit 11 end
+  end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | [selector] =>
+    let wif := if String.eqb selector "public-one" then string_of_bytes wif_testnet else "" in
+    match import_slot_wif Regtest wif with
+    | SlotError _ => exit 1
+    | SlotOk h1 => check h1
+    end
+  | _ => exit 1 end.

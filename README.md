@@ -644,3 +644,65 @@ check the public regtest identity, replacement/lock invalidation, rejected
 mainnet/malformed WIFs, and oversized-handle rejection before ABI narrowing.
 Captured boot logs are checked for WIF/private scalar hex. The new tests run with
 the unchanged legacy tests in `./scripts/check`. Nothing is broadcast or persisted.
+
+## Handle-only approved PSBT signing (composition; not an authoritative owner)
+
+`wallet_slot_sign_runtime.soma` signs an approved PSBT with the retained key
+slot. The key is imported once, through `import_slot_wif`. `sign_reviewed_slot`
+takes a `slot_identity` and never asks for, decodes or derives a WIF.
+`slot_session` starts a session whose `key_ref` is the live slot generation.
+After the pending state is saved, the composition does these steps in order:
+
+- It refuses any session whose key reference does not name the given identity
+  (`SlotPsbtKeyRefMismatch`).
+- It prepares the exact approved PSBT and its BIP 143 digest, with ownership
+  checked against the slot's public identity.
+- It signs by handle (`sign_slot`), inserts the libsecp256k1-verified DER and
+  completes `Signed`, bound to the source PSBT.
+
+The existing `store_pending` hook runs before any slot IO. Every attempt that
+reaches the hook consumes the approval. Every exit clears slot staging and
+public outputs, but the retained key stays. `lock_slot_session` erases the
+slot and returns `Locked`, which drops every handle, approval and export
+reference. After a lock or a replacement import, old handles are refused as
+stale.
+
+What enforces what:
+
+- The WASM slot enforces that only the current generation signs and that
+  lock/replacement erase key material.
+- The session transitions enforce approval, one-shot consumption and PSBT
+  binding.
+- The caller still threads the single session value, must install every
+  returned state and must not replay old immutable states. `store_pending`
+  remains a trusted callback contract.
+
+This is a composition, not the authoritative owner. That owner is not
+implemented in this step. No capability audit has been done, so the existing
+Sandbox iteration and state-threading capabilities are not ruled out for it.
+The owner and the HTTP/UI review, approve, sign, export and lock wiring remain
+unavailable.
+
+Identity generations are range-checked (1..65535) before any conversion to a
+session key reference. Out-of-range identities are refused as
+`SlotPsbtInvalidIdentity` before the hook or any slot IO, leaving the approval
+untouched and staging clean. `slot_session` returns `None` for them.
+WASM erasure does not cover the immutable WIF text the importer was given.
+
+`tests/runtime_slot_sign.soma` and `tests/test_runtime_slot_sign.py` boot the
+public fixture with scalar one, imported once. They cover these negatives:
+
+- missing, reloaded and consumed approval
+- a foreign key reference
+- out-of-range identities: zero, 65536, and 2^32 above the live handle
+- a different PSBT
+- a failed pending store
+- a repeated sign after `Signed`
+- stale handles after lock, and after replacement by scalar two
+- a replacement identity against the old approval
+
+Each negative checks that slot staging and outputs are clean afterwards. The
+Python check then verifies the exported PSBT independently: map preservation,
+outputs and fee, funding ownership, the BIP 143 digest, and the OpenSSL
+signature with low-S. It also checks that no WIF or scalar hex appears in the
+logs.
