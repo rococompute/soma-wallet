@@ -34,6 +34,37 @@ with each successful result, serialize events, and never reuse old immutable
 states or accept model constructors from clients. It must release/erase key-store
 material on lock; dropping a handle alone is not secret-memory erasure.
 
+## Pure signing preparation and candidate export
+
+`wallet_signing_prepare.soma` is a pure first step toward the signing driver.
+`reference_for` validates bounded PSBT bytes before binding a session reference
+to SHA256 of those exact bytes, including metadata. `prepare_signing` refuses
+missing, stale and consumed approvals, verifies that content binding, applies
+`check_psbt_input_owner`, refuses a pre-existing partial signature for this key,
+and obtains the digest from `p2wpkh_sighash_all`. A successful preparation carries
+the model's next `Signing` state, with approval consumed, alongside public data.
+A future authoritative driver must save that state before IO, bind its key
+handle to the actual imported identity/secret, serialize events, and never reuse
+old immutable states or preparation values. This pure function cannot enforce
+linear ownership of caller-held values and does not retain any key material.
+
+`wallet_partial_export.soma` performs mechanical BIP 174 candidate insertion:
+0x02 || compressed public key -> DER || SIGHASH_ALL, preserving all other maps
+and entries. It refuses duplicates, checks minimal positive DER INTEGER framing,
+re-parses serialized bytes under the parser's limits, and encodes canonical
+Base64. A candidate is explicitly **not a verified signature or signed session**;
+this helper does not call `complete_sign`, perform cryptography or authorize
+export to a user. The runtime driver must verify libsecp256k1's DER against the
+prepared digest and actual key before publishing a signed result.
+
+New tests use a synthetic public r=1,s=1 DER value solely to check exact byte
+insertion and Base64, never to claim a valid signature for the transaction.
+Independent Python recomputes the BIP 143 digest and candidate framing. Pure
+checks cover content substitution, consumed approval, ownership/policy failures,
+index and duplicate rejection, DER shape and byte bounds. Runtime PSBT signing,
+verified result completion, retained secret handles, UI sign/export wiring,
+multi-input batches and finalization remain unavailable. Nothing is broadcast.
+
 ## PSBT v0 parsing and BIP 143 digest
 
 `wallet_psbt.soma` is a pure, bounded parser/serializer for PSBT v0 (BIP 174)

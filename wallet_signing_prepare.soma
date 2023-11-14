@@ -1,0 +1,62 @@
+(** Pure preparation only: no key bytes, bridge effects or signature success.
+    A future serialized driver must store the returned Signing state BEFORE
+    performing IO, bind the key handle to this identity, and reject reuse of
+    immutable prior states/tickets. Nothing here is a linear capability. *)
+Import wallet_psbt wallet_keys wallet_session wallet_input_owner.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+Inductive signing_prepare_error :=
+| SigningSessionError (error : session_error)
+| SigningParserError (error : parse_error)
+| SigningOwnerError (error : input_owner_error)
+| InputNotOwned
+| PartialSignatureAlreadyPresent.
+Inductive preparation (A : Type) := Prepared (value : A) | PreparationFailed (error : signing_prepare_error).
+Arguments Prepared {A} value.
+Arguments PreparationFailed {A} error.
+
+(** The session digest is SHA256 of the exact bounded, parsed PSBT bytes,
+    including metadata/unknown entries, not just its unsigned transaction. *)
+reference_for (handle : nat) (raw : bytes) : outcome psbt_ref :=
+  bind (parse_psbt raw) (fun _ => Done (ParsedPsbtRef handle (hex_of_bytes (sha256_of_bytes raw)))).
+
+reference_matches (reference : psbt_ref) (raw : bytes) : bool :=
+  match reference with ParsedPsbtRef _ digest => String.eqb digest (hex_of_bytes (sha256_of_bytes raw)) end.
+
+Inductive signing_preparation := SigningPreparation
+  (pending : session) (transaction : psbt) (index : nat)
+  (public_id : public_identity) (sighash : bytes).
+
+prepare_signing (state : session) (raw : bytes) (public_id : public_identity) (index : nat)
+    : preparation signing_preparation :=
+  match sign_request state with
+  | Err e => PreparationFailed (SigningSessionError e)
+  | Ok pending =>
+      match pending with
+      | Signing (SignPermission _ reference) =>
+        match parse_psbt raw with
+        | Fail e => PreparationFailed (SigningParserError e)
+        | Done p =>
+          if negb (reference_matches reference raw)
+          then PreparationFailed (SigningSessionError ApprovalForDifferentPsbt)
+          else match check_psbt_input_owner public_id p index with
+          | InputOwnerError e => PreparationFailed (SigningOwnerError e)
+          | InputOwnerChecked NotOwned => PreparationFailed InputNotOwned
+          | InputOwnerChecked Owned =>
+            match p, public_id with
+            | Psbt _ _ maps _, PublicIdentity _ pub _ _ =>
+              match lookup (2 :: pub) (nth index maps []) with
+              | Some _ => PreparationFailed PartialSignatureAlreadyPresent
+              | None => match p2wpkh_sighash_all p index with
+                | Fail e => PreparationFailed (SigningParserError e)
+                | Done digest => Prepared (SigningPreparation pending p index public_id digest)
+                end
+              end
+            end
+          end
+        end
+      | _ => PreparationFailed (SigningSessionError SignNotRequested)
+      end
+  end.

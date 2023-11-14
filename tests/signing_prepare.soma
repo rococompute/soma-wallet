@@ -1,0 +1,32 @@
+Import wallet_signing_prepare wallet_partial_export wallet_keys wallet_psbt wallet_session wallet_input_owner.
+Import tests.input_owner.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** Small public regtest/testnet-shaped transaction, scalar-one public identity.
+    DER below is SYNTHETIC r=1,s=1 serialization data, NOT a valid signature
+    for this transaction. No cryptographic success is claimed or produced. *)
+raw : bytes := framed [utxo owned_script].
+synthetic_der : bytes := [48,6,2,1,1,2,1,1].
+ref_for (data : bytes) : psbt_ref :=
+  match reference_for 7%nat data with Done p => p | Fail _ => ParsedPsbtRef 7%nat "invalid" end.
+approved_for (data : bytes) : session := Approved (KeyRef 9%nat) (ref_for data) (ApprovalFor (ref_for data)).
+try_map (m : psbt_map) : preparation signing_preparation :=
+  let data := framed m in prepare_signing (approved_for data) data id 0%nat.
+prepare_error (r : preparation signing_preparation) : option signing_prepare_error :=
+  match r with Prepared _ => None | PreparationFailed e => Some e end.
+pending_of (r : preparation signing_preparation) : option session :=
+  match r with Prepared (SigningPreparation pending _ _ _ _) => Some pending | PreparationFailed _ => None end.
+digest_of (r : preparation signing_preparation) : option bytes :=
+  match r with Prepared (SigningPreparation _ _ _ _ digest) => Some digest | PreparationFailed _ => None end.
+ready : preparation signing_preparation := prepare_signing (approved_for raw) raw id 0%nat.
+again : option signing_prepare_error := match pending_of ready with Some pending => prepare_error (prepare_signing pending raw id 0%nat) | None => None end.
+other_id : public_identity :=
+  match identity_of_pubkey Testnet (hex "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5") with
+  | KDone v => v | KFail _ => PublicIdentity Testnet [] [] [] end.
+candidate : candidate_result partial_candidate := insert_partial_candidate raw id 0%nat synthetic_der.
+candidate_bytes : option bytes := match candidate with Candidate (PartialCandidate data _) => Some data | CandidateRejected _ => None end.
+candidate_text : option string := match candidate with Candidate (PartialCandidate _ data) => Some data | CandidateRejected _ => None end.
+candidate_error (r : candidate_result partial_candidate) : option partial_export_error :=
+  match r with Candidate _ => None | CandidateRejected e => Some e end.

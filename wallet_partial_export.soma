@@ -1,0 +1,107 @@
+(** Mechanical public-data serialization, NOT cryptographic verification.
+    Candidate output is not a signed-session result and never calls
+    complete_sign. A future runtime driver must independently verify the DER
+    from libsecp256k1 against the prepared digest/key before publishing it. *)
+Import wallet_psbt wallet_keys wallet_input_owner.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+Inductive partial_export_error :=
+| ExportParserError (error : parse_error)
+| ExportOwnerError (error : input_owner_error)
+| ExportNotOwned | ExportDuplicateSignature | InvalidDerEncoding.
+Inductive candidate_result (A : Type) := Candidate (value : A) | CandidateRejected (error : partial_export_error).
+Arguments Candidate {A} value.
+Arguments CandidateRejected {A} error.
+
+base64_alphabet : bytes := bytes_of_string "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".
+b64_char (value : int) : int := nth (Ascii.nat_of_ascii (Sha256.ascii_of_byte value)) base64_alphabet 65.
+
+Fixpoint b64_encode_groups (raw : bytes) : bytes :=
+  match raw with
+  | [] => []
+  | [a] => [b64_char (lsr a 2), b64_char (lsl (land a 3) 4), 61, 61]
+  | [a,b] => [b64_char (lsr a 2), b64_char (lor (lsl (land a 3) 4) (lsr b 4)), b64_char (lsl (land b 15) 2), 61]
+  | a :: b :: c :: rest =>
+      [b64_char (lsr a 2), b64_char (lor (lsl (land a 3) 4) (lsr b 4)),
+       b64_char (lor (lsl (land b 15) 2) (lsr c 6)), b64_char (land c 63)] ++ b64_encode_groups rest
+  end.
+
+(** Bounded byte validation happens before encoding or allocation of output. *)
+base64_encode (raw : bytes) : outcome bytes :=
+  if negb (list_within raw max_psbt_bytes) then Fail InputTooLarge else
+  if negb (bytes_in_range raw) then Fail wallet_psbt.ByteOutOfRange else Done (b64_encode_groups raw).
+
+(** Positive, minimal DER INTEGER shape only, NOT scalar/signature validity. *)
+der_integer (value : bytes) : bool :=
+  match value with
+  | [] => false
+  | first :: rest =>
+    andb (ltb first 128)
+      (andb (existsb (fun b => negb (eqb b 0)) value)
+        (match rest with [] => true | second :: _ => if eqb first 0 then negb (ltb second 128) else true end))
+  end.
+
+der_shape (der : bytes) : bool :=
+  if negb (list_within der 72) then false else
+  if negb (bytes_in_range der) then false else
+  match der with
+  | tag :: total :: rtag :: rlen :: rest =>
+    if negb (andb (eqb tag 48) (eqb rtag 2)) then false else
+    if orb (eqb rlen 0) (ltb 33 rlen) then false else
+    match take rlen rest with
+    | Fail _ => false
+    | Done (r, stag :: slen :: s) =>
+      andb (eqb stag 2) (andb (negb (orb (eqb slen 0) (ltb 33 slen)))
+        (andb (eqb (len s) slen)
+          (andb (eqb total (add 4 (add rlen slen))) (andb (der_integer r) (der_integer s)))))
+    | Done _ => false
+    end
+  | _ => false
+  end.
+
+Fixpoint insert_partial_at (maps : list psbt_map) (index : nat) (key value : bytes)
+    : candidate_result (list psbt_map) :=
+  match maps, index with
+  | [], _ => CandidateRejected (ExportParserError InputIndexOutOfRange)
+  | m :: rest, O => match lookup key m with
+    | Some _ => CandidateRejected ExportDuplicateSignature
+    | None => Candidate ((m ++ [Entry key value]) :: rest)
+    end
+  | m :: rest, S n => match insert_partial_at rest n key value with
+    | CandidateRejected e => CandidateRejected e
+    | Candidate more => Candidate (m :: more)
+    end
+  end.
+
+Inductive partial_candidate := PartialCandidate (serialized : bytes) (base64_text : string).
+
+(** Syntactic candidate only: fixed-signature tests can exercise BIP 174
+    insertion without claiming that any cryptographic operation succeeded. *)
+insert_partial_candidate (raw : bytes) (public_id : public_identity) (index : nat) (der : bytes)
+    : candidate_result partial_candidate :=
+  match parse_psbt raw with
+  | Fail e => CandidateRejected (ExportParserError e)
+  | Done p => match check_psbt_input_owner public_id p index with
+    | InputOwnerError e => CandidateRejected (ExportOwnerError e)
+    | InputOwnerChecked NotOwned => CandidateRejected ExportNotOwned
+    | InputOwnerChecked Owned =>
+      if negb (der_shape der) then CandidateRejected InvalidDerEncoding else
+      match p, public_id with
+      | Psbt global unsigned maps outputs, PublicIdentity _ pub _ _ =>
+        match insert_partial_at maps index (2 :: pub) (der ++ [1]) with
+        | CandidateRejected e => CandidateRejected e
+        | Candidate maps' =>
+          let serialized := serialize_psbt (Psbt global unsigned maps' outputs) in
+          match parse_psbt serialized with
+          | Fail e => CandidateRejected (ExportParserError e)
+          | Done _ => match base64_encode serialized with
+            | Fail e => CandidateRejected (ExportParserError e)
+            | Done ascii => Candidate (PartialCandidate serialized (string_of_bytes ascii))
+            end
+          end
+        end
+      end
+    end
+  end.

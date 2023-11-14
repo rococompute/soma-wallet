@@ -1,0 +1,86 @@
+(** Pure gates and candidate encoding only. No signature verification here. *)
+Example approved_prepares : prepare_error ready = None .
+Proof. vm_compute. reflexivity. Qed.
+Example consumes_approval : pending_of ready = Some (Signing (SignPermission (KeyRef 9%nat) (ref_for raw))) .
+Proof. vm_compute. reflexivity. Qed.
+Example refuses_second_attempt : again = Some (SigningSessionError ApprovalConsumed) .
+Proof. vm_compute. reflexivity. Qed.
+Example exact_bip143_digest : digest_of ready = Some (hex "7a4abecd189fde952f2e791e16c04ef8d98764db4f56b42916f2896821dd557a") .
+Proof. vm_compute. reflexivity. Qed.
+Example locked_gate : prepare_error (prepare_signing Locked raw id 0%nat) = Some (SigningSessionError NoKey) .
+Proof. vm_compute. reflexivity. Qed.
+Example imported_gate : prepare_error (prepare_signing (KeyImported (KeyRef 9%nat)) raw id 0%nat) = Some (SigningSessionError NoPsbt) .
+Proof. vm_compute. reflexivity. Qed.
+Example no_approval_gate : prepare_error (prepare_signing (PsbtLoaded (KeyRef 9%nat) (ref_for raw)) raw id 0%nat) = Some (SigningSessionError NotApproved) .
+Proof. vm_compute. reflexivity. Qed.
+Example different_psbt_gate : prepare_error (prepare_signing (approved_for raw) (framed [utxo other_script]) id 0%nat) = Some (SigningSessionError ApprovalForDifferentPsbt) .
+Proof. vm_compute. reflexivity. Qed.
+Example mismatched_consent_gate : prepare_error (prepare_signing (Approved (KeyRef 9%nat) (ref_for raw) (ApprovalFor (ParsedPsbtRef 0%nat "other"))) raw id 0%nat) = Some (SigningSessionError ApprovalForDifferentPsbt) .
+Proof. vm_compute. reflexivity. Qed.
+Example not_owned_gate : prepare_error (prepare_signing (approved_for raw) raw other_id 0%nat) = Some InputNotOwned .
+Proof. vm_compute. reflexivity. Qed.
+Example index_gate : prepare_error (prepare_signing (approved_for raw) raw id 1%nat) = Some (SigningOwnerError (InputPolicyError InputIndexOutOfRange)) .
+Proof. vm_compute. reflexivity. Qed.
+Example missing_utxo_gate : prepare_error (try_map []) = Some (SigningOwnerError (InputPolicyError MissingWitnessUtxo)) .
+Proof. vm_compute. reflexivity. Qed.
+Example sighash_gate : prepare_error (try_map [utxo owned_script, Entry [3] [2,0,0,0]]) = Some (SigningOwnerError (InputPolicyError UnsupportedSighash)) .
+Proof. vm_compute. reflexivity. Qed.
+Example nonwitness_gate : prepare_error (try_map [utxo owned_script, Entry [0] []]) = Some (SigningOwnerError (InputPolicyError UnsupportedNonWitnessUtxo)) .
+Proof. vm_compute. reflexivity. Qed.
+Example redeem_gate : prepare_error (try_map [utxo owned_script, Entry [4] []]) = Some (SigningOwnerError (InputPolicyError UnsupportedRedeemScript)) .
+Proof. vm_compute. reflexivity. Qed.
+Example witness_gate : prepare_error (try_map [utxo owned_script, Entry [5] []]) = Some (SigningOwnerError (InputPolicyError UnsupportedWitnessScript)) .
+Proof. vm_compute. reflexivity. Qed.
+Example script_gate : prepare_error (try_map [utxo [81]]) = Some (SigningOwnerError (IdentityPolicyError wallet_keys.UnsupportedScript)) .
+Proof. vm_compute. reflexivity. Qed.
+Example existing_partial_gate : prepare_error (try_map [utxo owned_script, Entry (2 :: pub) (synthetic_der ++ [1])]) = Some PartialSignatureAlreadyPresent .
+Proof. vm_compute. reflexivity. Qed.
+Example exact_candidate_bytes : candidate_bytes = Some (hex "70736274ff01003c020000000101010101010101010101010101010101010101010101010101010101010101010101010100ffffffff01010000000000000000000000000001011f0200000000000000160014751e76e8199196d454941c45d1b3a323f1433bd622020279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798093006020101020101010000") .
+Proof. vm_compute. reflexivity. Qed.
+Example exact_candidate_base64 : candidate_text = Some "cHNidP8BADwCAAAAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQD/////AQEAAAAAAAAAAAAAAAAAAQEfAgAAAAAAAAAWABR1HnboGZGW1FSUHEXRs6Mj8UM71iICAnm+Zn753LusVaBilc6HCwcCm/zbLc4o2VnygVsW+BeYCTAGAgEBAgEBAQAA" .
+Proof. vm_compute. reflexivity. Qed.
+Example candidate_roundtrip : match candidate_text with Some s => bind (parse_psbt_base64 (bytes_of_string s)) (fun p => Done (serialize_psbt p)) | None => Fail BadMagic end = Done (hex "70736274ff01003c020000000101010101010101010101010101010101010101010101010101010101010101010101010100ffffffff01010000000000000000000000000001011f0200000000000000160014751e76e8199196d454941c45d1b3a323f1433bd622020279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798093006020101020101010000") .
+Proof. vm_compute. reflexivity. Qed.
+Example candidate_duplicate_rejected : candidate_error (insert_partial_candidate (hex "70736274ff01003c020000000101010101010101010101010101010101010101010101010101010101010101010101010100ffffffff01010000000000000000000000000001011f0200000000000000160014751e76e8199196d454941c45d1b3a323f1433bd622020279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798093006020101020101010000") id 0%nat synthetic_der) = Some ExportDuplicateSignature .
+Proof. vm_compute. reflexivity. Qed.
+Example invalid_der_rejected : candidate_error (insert_partial_candidate raw id 0%nat [48,6,2,1,128,2,1,1]) = Some InvalidDerEncoding .
+Proof. vm_compute. reflexivity. Qed.
+Example nonminimal_der_rejected : der_shape [48,7,2,2,0,1,2,1,1] = false .
+Proof. vm_compute. reflexivity. Qed.
+Example trailing_der_rejected : der_shape (synthetic_der ++ [0]) = false .
+Proof. vm_compute. reflexivity. Qed.
+Example byte_encoding_rejected : base64_encode [300] = Fail wallet_psbt.ByteOutOfRange .
+Proof. vm_compute. reflexivity. Qed.
+Example base64_padding_vectors : base64_encode [77] = Done (bytes_of_string "TQ==") /\ base64_encode [77,97] = Done (bytes_of_string "TWE=") /\ base64_encode [77,97,110] = Done (bytes_of_string "TWFu") .
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem locked_never_prepares : forall raw public_id index,
+  prepare_signing Locked raw public_id index = PreparationFailed (SigningSessionError NoKey).
+Proof. reflexivity. Qed.
+
+Theorem consumed_never_prepares : forall permission raw public_id index,
+  prepare_signing (Signing permission) raw public_id index = PreparationFailed (SigningSessionError ApprovalConsumed).
+Proof. reflexivity. Qed.
+
+Theorem loading_discards_prior_approval : forall key old reviewed next,
+  load_psbt (Approved key old (ApprovalFor reviewed)) next = Ok (PsbtLoaded key next).
+Proof. reflexivity. Qed.
+
+Theorem preparation_requires_approved_state : forall state raw public_id index result,
+  prepare_signing state raw public_id index = Prepared result ->
+  exists key transaction consent, state = Approved key transaction consent.
+Proof.
+  intros state raw public_id index result H.
+  destruct state as [|key|key transaction|key transaction consent|permission|output];
+    try (cbn [prepare_signing sign_request] in H; discriminate H).
+  exists key, transaction, consent. reflexivity.
+Qed.
+
+Theorem encoding_rejects_over_limit : forall raw,
+  list_within raw max_psbt_bytes = false -> base64_encode raw = Fail InputTooLarge.
+Proof. intros raw H. unfold base64_encode. rewrite H. reflexivity. Qed.
+
+Theorem encoding_rejects_nonbytes : forall raw,
+  list_within raw max_psbt_bytes = true -> bytes_in_range raw = false ->
+  base64_encode raw = Fail wallet_psbt.ByteOutOfRange.
+Proof. intros raw H B. unfold base64_encode. rewrite H, B. reflexivity. Qed.
