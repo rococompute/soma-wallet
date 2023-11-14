@@ -16,7 +16,8 @@ Inductive owner_http_error :=
 | HttpTooLarge | HttpIncomplete | HttpRequestLine | HttpUnknownRoute
 | HttpMethod | HttpHeaders | HttpLength | HttpTransferEncoding
 | HttpContentType | HttpBody | HttpRevision | HttpInputIndex
-| HttpPsbt (error : parse_error).
+| HttpPsbt (error : parse_error)
+| HttpCrossSite.
 Inductive owner_http_result := HttpCommand (command : owner_http_command)
   | HttpRejected (error : owner_http_error).
 
@@ -59,6 +60,27 @@ headers_ok (lines : list bytes) : bool :=
   match header_values (bytes_of_string "host") lines with
   | [host] => match host with [] => false | _ => list_within host 255 end
   | _ => false end.
+
+(** Browser-forgery guard for state-changing POSTs. This is not
+    authentication. Browsers send form POSTs cross-site without a preflight, so a
+    POST is refused before dispatch when it carries an Origin that is not exactly
+    "http://" ++ Host (this includes "null", another scheme, host or port), a
+    Sec-Fetch-Site other than "same-origin" or "none", or either header more than
+    once. Requests carrying neither header (non-browser clients) are still
+    accepted. *)
+origin_ok (lines : list bytes) : bool :=
+  match header_values (bytes_of_string "origin") lines with
+  | [] => true
+  | [origin] => match header_values (bytes_of_string "host") lines with
+    | [host] => bytes_eqb origin (bytes_of_string "http://" ++ host)
+    | _ => false end
+  | _ => false end.
+fetch_site_ok (lines : list bytes) : bool :=
+  match header_values (bytes_of_string "sec-fetch-site") lines with
+  | [] => true
+  | [site] => orb (bytes_eqb site (bytes_of_string "same-origin")) (bytes_eqb site (bytes_of_string "none"))
+  | _ => false end.
+same_origin_ok (lines : list bytes) : bool := andb (origin_ok lines) (fetch_site_ok lines).
 
 Inductive owner_http_route := RouteInspect | RouteFixture | RouteLoad
   | RouteApprove | RouteSign | RouteExport | RouteLock | RouteReset.
@@ -134,6 +156,7 @@ decode_owner_http (request : string) : owner_http_result :=
     | Some (post, route) =>
       let body := body_of raw in
       if post then
+        if negb (same_origin_ok lines) then HttpRejected HttpCrossSite else
         match header_values (bytes_of_string "content-type") lines with
         | [value] => if bytes_eqb (map lower value) (bytes_of_string "application/x-www-form-urlencoded")
           then body_framing post route lines body else HttpRejected HttpContentType

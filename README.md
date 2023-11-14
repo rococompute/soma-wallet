@@ -980,6 +980,38 @@ values into the existing KDF-gated adapter. Practical production KDF execution,
 key-slot unlock/lock lifecycle, encrypted persistence/restart tests and UI unlock
 remain unavailable. WASM wiping cannot erase immutable copies held by callers.
 
+## Owner UI browser-forgery guard (not authentication)
+
+The 8081 owner app's state-changing routes (`/fixture`, `/review`, `/approve`,
+`/sign`, `/lock`, `/reset`) accept form POSTs. Browsers send these cross-site
+without a CORS preflight, and review revisions are small public numbers. Any web
+page open on the host could therefore auto-submit an approval and a signature.
+
+`decode_owner_http` now refuses such a POST before dispatch, with
+`HttpCrossSite`, leaving owner state unchanged, when:
+
+- an `Origin` header is present but is not exactly `http://` plus the request's
+  `Host`. This includes `null`, another scheme, host or port;
+- a `Sec-Fetch-Site` header is present but is not `same-origin` or `none`;
+- either header appears more than once.
+
+Requests carrying neither header (curl, scripts and the existing tests) are
+still accepted.
+
+This only protects against browser forgery. It does not authenticate the
+operator, and a local process can still drive the app. There is no per-boot form
+token yet.
+
+`tests/owner_http_origin.soma`/`.exp` prove, for every state-changing route,
+that headerless, same-origin, Origin-only and `Sec-Fetch-Site: none` posts are
+accepted. They prove that foreign-origin, `null`, wrong-port, missing-port,
+`https`, duplicate-header, `cross-site` and `same-site` posts are refused.
+`tests/test_owner_app_origin.py` boots the app host-only and isolated. It shows
+that each forged variant of import, review, approve, sign, lock and reset
+changes nothing: the displayed revision and stage are unchanged, and no signature
+or export appears. The same-origin flow still imports, approves, signs, exports
+and locks.
+
 ## Serialized production-vault unlock-attempt lifecycle
 
 The existing authoritative `wallet_sign_owner.soma` now accepts the signer-local

@@ -1,0 +1,32 @@
+Theorem headerless_accepted : accepted "" = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem same_origin_accepted :
+  accepted (txt [line "Origin: http://wallet:8081", line "Sec-Fetch-Site: same-origin"]) = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem origin_only_accepted : accepted (line "Origin: http://wallet:8081") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem fetch_none_accepted : accepted (line "Sec-Fetch-Site: none") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem foreign_origin_refused : cross_site (line "Origin: http://evil.example") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem null_origin_refused : cross_site (line "Origin: null") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem wrong_port_refused : cross_site (line "Origin: http://wallet:8082") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem missing_port_refused : cross_site (line "Origin: http://wallet") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem other_scheme_refused : cross_site (line "Origin: https://wallet:8081") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem duplicate_origin_refused :
+  cross_site (txt [line "Origin: http://wallet:8081", line "Origin: http://wallet:8081"]) = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem cross_site_fetch_refused : cross_site (line "Sec-Fetch-Site: cross-site") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem same_site_fetch_refused : cross_site (line "Sec-Fetch-Site: same-site") = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem duplicate_fetch_refused :
+  cross_site (txt [line "Sec-Fetch-Site: same-origin", line "Sec-Fetch-Site: same-origin"]) = true.
+Proof. vm_compute. reflexivity. Qed.
+Theorem good_origin_bad_fetch_refused :
+  cross_site (txt [line "Origin: http://wallet:8081", line "Sec-Fetch-Site: cross-site"]) = true.
+Proof. vm_compute. reflexivity. Qed.

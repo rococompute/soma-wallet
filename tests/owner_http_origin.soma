@@ -1,0 +1,22 @@
+Import wallet_psbt.
+Import wallet_review.
+Import wallet_owner_http.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** Pure expectations for the browser-forgery guard on every state-changing
+    route. The fixture body is the existing public synthetic regtest PSBT. *)
+line (s : string) : string := String.append s crlf.
+post (path body : string) (extra : string) : string := txt [
+  line (txt ["POST ",path," HTTP/1.1"]), line "Host: wallet:8081",
+  line "Content-Type: application/x-www-form-urlencoded",
+  line (txt ["Content-Length: ", decimal (count (bytes_of_string body))]),
+  extra, crlf, body].
+fixture_body : string := "psbt=cHNidP8BAFICAAAAASpJMQ6eWqPL3yAOqkLGoZEKHiCFQbNnynXJebrE71iiAAAAAAD9%2F%2F%2F%2FAbiCAQAAAAAAFgAUBq%2FUa839Iu%2BUrBIqoR8kEkSjfswAAAAAAvwBAqq7AAEBH6CGAQAAAAAAFgAUdR526BmRltRUlBxF0bOjI%2FFDO9YC%2FAIBzAAC%2FAMB3QA%3D".
+routes : list (string * string) := [("/fixture", ""), ("/review", fixture_body),
+  ("/approve", "revision=1"), ("/sign", "input=0"), ("/lock", ""), ("/reset", "")].
+accepted (extra : string) : bool := forallb (fun r =>
+  match decode_owner_http (post (fst r) (snd r) extra) with HttpCommand _ => true | _ => false end) routes.
+cross_site (extra : string) : bool := forallb (fun r =>
+  match decode_owner_http (post (fst r) (snd r) extra) with HttpRejected HttpCrossSite => true | _ => false end) routes.
