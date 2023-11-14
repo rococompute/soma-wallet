@@ -34,6 +34,23 @@ with each successful result, serialize events, and never reuse old immutable
 states or accept model constructors from clients. It must release/erase key-store
 material on lock; dropping a handle alone is not secret-memory erasure.
 
+## PSBT v0 parsing and BIP 143 digest
+
+`wallet_psbt.soma` is a pure, bounded parser/serializer for PSBT v0 (BIP 174)
+with a legacy-serialized unsigned transaction (versions 1 and 2), and the native
+P2WPKH SIGHASH_ALL digest (BIP 143). It rejects bad magic, truncation,
+noncanonical or oversized CompactSize lengths, duplicate keys, invalid key
+lengths for fixed-key types, missing unsigned transactions, PSBT versions other
+than 0, witness-serialized or scriptSig-bearing unsigned transactions, empty or
+oversized input/output lists, out-of-range amounts and trailing bytes, each with
+a typed error. Limits: 100000 PSBT bytes, 64 map entries, 64 inputs/outputs,
+128-byte keys, 10000-byte scripts. Entries are kept in order, so a parsed PSBT
+serializes back to its exact bytes. The digest requires a P2WPKH witness UTXO
+and SIGHASH_ALL (or no sighash entry). `tests/psbt.soma` checks BIP 143's
+native P2WPKH example (fields, round trip, digest `c37af311...`) framed as a
+PSBT, and the rejections. Not yet: base64 input, BIP 174's published PSBT
+vectors, non-witness UTXO checks, and wiring into the UI or signer.
+
 ## Development
 
 Requires the existing local Soma checkout/toolchain, opam switch `hvf` with the

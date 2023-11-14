@@ -1,0 +1,47 @@
+(** Build-failing checked expectations for tests/psbt.soma. *)
+Theorem bip143_fields : fields = Done (1, 2%nat, [112340000, 223450000], 17).
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem tx_round_trip : bind (parse_tx unsigned) (fun t => Done (serialize_tx t)) = Done unsigned.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem psbt_round_trip : round_trip = Done fixture.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem fixture_is_built_by_framing : build global_tx ([0] ++ in1) = fixture.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem bip143_p2wpkh_digest : digest_at parsed 1 = Done expected_sighash.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem digest_rejections :
+  error_of (digest_at parsed 0) = Some MissingWitnessUtxo /\
+  error_of (digest_at parsed 2) = Some InputIndexOutOfRange /\
+  error_of (digest_at (parse_psbt (build global_tx ([0] ++ in1 ++ kv [3] [129, 0, 0, 0]))) 1) = Some UnsupportedSighash /\
+  error_of (digest_at (parse_psbt (build global_tx ([0] ++ kv [1] (witness_utxo ++ [1])))) 1) = Some MalformedWitnessUtxo.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem framing_rejections :
+  error_of (parse_psbt unsigned) = Some BadMagic /\
+  error_of (parse_psbt (firstn 100 fixture)) = Some Truncated /\
+  error_of (parse_psbt (fixture ++ [0])) = Some TrailingBytes /\
+  error_of (parse_psbt (build (global_tx ++ global_tx) ([0] ++ in1))) = Some DuplicateKey /\
+  error_of (parse_psbt (build (kv [112] [1]) [])) = Some MissingUnsignedTx /\
+  error_of (parse_psbt (build (global_tx ++ kv [251] [2, 0, 0, 0]) ([0] ++ in1))) = Some UnsupportedPsbtVersion /\
+  error_of (parse_psbt (build (kv [0, 0] unsigned) ([0] ++ in1))) = Some InvalidKeyLength /\
+  error_of (parse_psbt (magic ++ [253, 1, 0])) = Some NoncanonicalCompactSize /\
+  error_of (parse_psbt (magic ++ [255, 0, 0, 0, 0, 1, 0, 0, 0])) = Some LengthTooLarge /\
+  error_of (parse_psbt (magic ++ [254, 0, 0, 1, 0])) = Some LengthTooLarge /\
+  error_of (parse_psbt (magic ++ [0])) = Some MissingUnsignedTx.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem transaction_rejections :
+  error_of (parse_tx (hex "03000000")) = Some UnsupportedTxVersion /\
+  error_of (parse_tx (hex "010000000001")) = Some WitnessSerializedUnsignedTx /\
+  error_of (parse_tx (hex "0100000000")) = Some NoInputs /\
+  error_of (parse_tx (firstn 41 unsigned ++ [1, 81] ++ skipn 42 unsigned)) = Some NonEmptyScriptSig /\
+  error_of (parse_tx (unsigned ++ [0])) = Some TrailingBytes /\
+  error_of (parse_tx (firstn 4 unsigned ++ [65])) = Some TooManyInputs /\
+  error_of (parse_tx ([1, 0, 0, 0, 1] ++ repeat 0 41%nat ++ [0])) = Some NoOutputs /\
+  error_of (parse_tx ([1, 0, 0, 0, 1] ++ repeat 0 41%nat ++ [1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 81])) = Some AmountOutOfRange.
+Proof. vm_compute. repeat split; reflexivity. Qed.

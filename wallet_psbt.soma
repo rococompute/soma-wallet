@@ -1,0 +1,318 @@
+(** Bounded, pure Bitcoin transaction / PSBT v0 (BIP 174) framing and the
+    native P2WPKH SIGHASH_ALL digest (BIP 143). Bytes are lists of
+    primitive ints below 256, as Soma.Crypto's SHA-256 takes them.
+    Every reader consumes its input list or a small fuel, so malicious
+    lengths cannot cause unbounded recursion; every length is checked
+    against a finite limit before bytes are taken. No IO, keys or signing. *)
+
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+bytes : Type := list int.
+
+(** ** Limits (development policy) *)
+max_psbt_bytes : int := 100000.
+max_key_bytes : int := 128.
+max_value_bytes : int := 100000.
+max_script_bytes : int := 10000.
+max_tx_inputs : int := 64.
+max_tx_outputs : int := 64.
+max_money : int := 2100000000000000.
+(** fuel: one more than the largest number of entries a map may hold *)
+map_fuel : nat := 65%nat.
+count_fuel : nat := 65%nat.
+
+Inductive parse_error :=
+| Truncated
+| NoncanonicalCompactSize
+| LengthTooLarge
+| InputTooLarge
+| BadMagic
+| TooManyEntries
+| DuplicateKey
+| InvalidKeyLength
+| MissingUnsignedTx
+| UnsupportedPsbtVersion
+| UnsupportedTxVersion
+| WitnessSerializedUnsignedTx
+| NoInputs
+| NoOutputs
+| TooManyInputs
+| TooManyOutputs
+| NonEmptyScriptSig
+| ScriptTooLarge
+| AmountOutOfRange
+| TrailingBytes
+| InputIndexOutOfRange
+| MissingWitnessUtxo
+| MalformedWitnessUtxo
+| UnsupportedScript
+| UnsupportedSighash.
+
+Inductive outcome (A : Type) := Done (value : A) | Fail (error : parse_error).
+Arguments Done {A} value.
+Arguments Fail {A} error.
+
+bind {A B : Type} (r : outcome A) (f : A -> outcome B) : outcome B :=
+  match r with Done a => f a | Fail e => Fail e end.
+
+(** ** Bytes *)
+len {A : Type} (b : list A) : int := fold_left (fun n _ => add n 1) b 0.
+
+Fixpoint bytes_eqb (a b : bytes) : bool :=
+  match a, b with
+  | [], [] => true
+  | x :: a', y :: b' => if eqb x y then bytes_eqb a' b' else false
+  | _, _ => false
+  end.
+
+(** little-endian value of at most 7 bytes (fits in 63 bits) *)
+le_value (b : bytes) : int := fold_right (fun x acc => lor x (lsl acc 8)) 0 b.
+
+Fixpoint le_bytes (n : nat) (v : int) : bytes :=
+  match n with O => [] | S k => land v 255 :: le_bytes k (lsr v 8) end.
+
+Fixpoint take_acc (n : int) (b : bytes) (acc : bytes) : outcome (bytes * bytes) :=
+  if eqb n 0 then Done (rev acc, b) else
+  match b with
+  | [] => Fail Truncated
+  | x :: r => take_acc (sub n 1) r (x :: acc)
+  end.
+
+(** exactly [n] bytes, or [Truncated] *)
+take (n : int) (b : bytes) : outcome (bytes * bytes) := take_acc n b [].
+
+(** BIP 174/Bitcoin CompactSize; only the shortest encoding is accepted,
+    and the 9-byte form always exceeds every limit here. *)
+read_compact (b : bytes) : outcome (int * bytes) :=
+  match b with
+  | [] => Fail Truncated
+  | x :: r =>
+      if ltb x 253 then Done (x, r)
+      else if eqb x 253 then
+        bind (take 2 r) (fun p => let (h, t) := p in
+          let v := le_value h in
+          if ltb v 253 then Fail NoncanonicalCompactSize else Done (v, t))
+      else if eqb x 254 then
+        bind (take 4 r) (fun p => let (h, t) := p in
+          let v := le_value h in
+          if ltb v 65536 then Fail NoncanonicalCompactSize else Done (v, t))
+      else
+        bind (take 8 r) (fun p => let (h, _) := p in
+          if bytes_eqb (skipn 4 h) [0, 0, 0, 0] then Fail NoncanonicalCompactSize
+          else Fail LengthTooLarge)
+  end.
+
+encode_compact (n : int) : bytes :=
+  if ltb n 253 then [n]
+  else if ltb n 65536 then 253 :: le_bytes 2 n
+  else 254 :: le_bytes 4 n.
+
+(** a CompactSize length, then that many bytes, at most [limit] *)
+read_var (limit : int) (too_large : parse_error) (b : bytes) : outcome (bytes * bytes) :=
+  bind (read_compact b) (fun p => let (n, r) := p in
+    if ltb limit n then Fail too_large else take n r).
+
+encode_var (b : bytes) : bytes := encode_compact (len b) ++ b.
+
+(** ** Transactions (legacy serialization only: an unsigned PSBT tx) *)
+Inductive tx_input := TxIn (prevout : bytes) (sequence : bytes).
+Inductive tx_output := TxOut (amount : int) (script : bytes).
+Inductive tx := Tx (version : int) (inputs : list tx_input) (outputs : list tx_output) (locktime : int).
+
+read_amount (b : bytes) : outcome (int * bytes) :=
+  bind (take 8 b) (fun p => let (h, t) := p in
+    if negb (eqb (nth 7 h 0) 0) then Fail AmountOutOfRange else
+    let v := le_value (firstn 7 h) in
+    if ltb max_money v then Fail AmountOutOfRange else Done (v, t)).
+
+(** BIP 174: an unsigned transaction's scriptSigs are empty *)
+read_input (b : bytes) : outcome (tx_input * bytes) :=
+  bind (take 36 b) (fun p => let (prevout, r) := p in
+    bind (read_compact r) (fun p => let (slen, r2) := p in
+      if negb (eqb slen 0) then Fail NonEmptyScriptSig else
+      bind (take 4 r2) (fun p => let (sequence, r3) := p in
+        Done (TxIn prevout sequence, r3)))).
+
+read_output (b : bytes) : outcome (tx_output * bytes) :=
+  bind (read_amount b) (fun p => let (amount, r) := p in
+    bind (read_var max_script_bytes ScriptTooLarge r) (fun p => let (script, r2) := p in
+      Done (TxOut amount script, r2))).
+
+Fixpoint read_many {A : Type} (fuel : nat) (item : bytes -> outcome (A * bytes))
+    (n : int) (b : bytes) (acc : list A) : outcome (list A * bytes) :=
+  if eqb n 0 then Done (rev acc, b) else
+  match fuel with
+  | O => Fail TooManyEntries
+  | S f => bind (item b) (fun p => let (x, r) := p in read_many f item (sub n 1) r (x :: acc))
+  end.
+
+read_tx (b : bytes) : outcome (tx * bytes) :=
+  bind (take 4 b) (fun p => let (vb, r) := p in
+    let version := le_value vb in
+    if negb (orb (eqb version 1) (eqb version 2)) then Fail UnsupportedTxVersion else
+    bind (read_compact r) (fun p => let (nin, r2) := p in
+      if eqb nin 0 then
+        (if eqb (nth 0 r2 0) 1 then Fail WitnessSerializedUnsignedTx else Fail NoInputs)
+      else if ltb max_tx_inputs nin then Fail TooManyInputs else
+      bind (read_many count_fuel read_input nin r2 []) (fun p => let (ins, r3) := p in
+        bind (read_compact r3) (fun p => let (nout, r4) := p in
+          if eqb nout 0 then Fail NoOutputs
+          else if ltb max_tx_outputs nout then Fail TooManyOutputs else
+          bind (read_many count_fuel read_output nout r4 []) (fun p => let (outs, r5) := p in
+            bind (take 4 r5) (fun p => let (lb, r6) := p in
+              Done (Tx version ins outs (le_value lb), r6))))))).
+
+(** the whole of [b] is one unsigned transaction *)
+parse_tx (b : bytes) : outcome tx :=
+  bind (read_tx b) (fun p => let (t, r) := p in
+    match r with [] => Done t | _ => Fail TrailingBytes end).
+
+serialize_input (i : tx_input) : bytes :=
+  match i with TxIn prevout sequence => prevout ++ [0] ++ sequence end.
+serialize_output (o : tx_output) : bytes :=
+  match o with TxOut amount script => le_bytes 8 amount ++ encode_var script end.
+serialize_outputs (outs : list tx_output) : bytes := flat_map serialize_output outs.
+
+serialize_tx (t : tx) : bytes :=
+  match t with
+  | Tx version ins outs locktime =>
+      le_bytes 4 version ++ encode_compact (len ins) ++ flat_map serialize_input ins
+      ++ encode_compact (len outs) ++ serialize_outputs outs ++ le_bytes 4 locktime
+  end.
+
+(** ** PSBT v0 maps *)
+Inductive entry := Entry (key : bytes) (value : bytes).
+psbt_map : Type := list entry.
+
+key_of (e : entry) : bytes := match e with Entry k _ => k end.
+
+lookup (k : bytes) (m : psbt_map) : option bytes :=
+  match find (fun e => bytes_eqb (key_of e) k) m with
+  | Some (Entry _ v) => Some v
+  | None => None
+  end.
+
+(** key types whose key data must be empty (BIP 174), per map *)
+single_byte_global : list int := [0, 251].
+single_byte_input : list int := [0, 1, 3, 4, 5, 7, 8].
+single_byte_output : list int := [0, 1].
+
+key_ok (single : list int) (k : bytes) : bool :=
+  match k with
+  | [] => false
+  | t :: rest => if existsb (eqb t) single then (match rest with [] => true | _ => false end) else true
+  end.
+
+(** one map: entries until the 0x00 separator; duplicate keys rejected *)
+Fixpoint read_map_acc (fuel : nat) (single : list int) (b : bytes) (acc : psbt_map)
+    : outcome (psbt_map * bytes) :=
+  match fuel with
+  | O => Fail TooManyEntries
+  | S f =>
+      bind (read_compact b) (fun p => let (klen, r) := p in
+        if eqb klen 0 then Done (rev acc, r)
+        else if ltb max_key_bytes klen then Fail LengthTooLarge else
+        bind (take klen r) (fun p => let (k, r2) := p in
+          if negb (key_ok single k) then Fail InvalidKeyLength else
+          bind (read_var max_value_bytes LengthTooLarge r2) (fun p => let (v, r3) := p in
+            match lookup k acc with
+            | Some _ => Fail DuplicateKey
+            | None => read_map_acc f single r3 (Entry k v :: acc)
+            end)))
+  end.
+
+read_map (single : list int) (b : bytes) : outcome (psbt_map * bytes) :=
+  read_map_acc map_fuel single b [].
+
+serialize_map (m : psbt_map) : bytes :=
+  flat_map (fun e => match e with Entry k v => encode_var k ++ encode_var v end) m ++ [0].
+
+Inductive psbt := Psbt (global : psbt_map) (unsigned : tx)
+  (input_maps : list psbt_map) (output_maps : list psbt_map).
+
+magic : bytes := [112, 115, 98, 116, 255].
+
+parse_psbt (b : bytes) : outcome psbt :=
+  if ltb max_psbt_bytes (len b) then Fail InputTooLarge else
+  if negb (bytes_eqb (firstn 5 b) magic) then Fail BadMagic else
+  bind (read_map single_byte_global (skipn 5 b)) (fun p => let (g, r) := p in
+    bind (match lookup [251] g with
+          | Some v => if bytes_eqb v [0, 0, 0, 0] then Done tt else Fail UnsupportedPsbtVersion
+          | None => Done tt
+          end) (fun _ =>
+    match lookup [0] g with
+    | None => Fail MissingUnsignedTx
+    | Some raw =>
+        bind (parse_tx raw) (fun t =>
+          match t with
+          | Tx _ ins outs _ =>
+              bind (read_many count_fuel (read_map single_byte_input) (len ins) r [])
+                (fun p => let (im, r2) := p in
+              bind (read_many count_fuel (read_map single_byte_output) (len outs) r2 [])
+                (fun p => let (om, r3) := p in
+              match r3 with
+              | [] => Done (Psbt g t im om)
+              | _ => Fail TrailingBytes
+              end))
+          end)
+    end)).
+
+(** Every entry is kept in order with canonical lengths, so a parsed PSBT
+    serializes back to its exact bytes. *)
+serialize_psbt (p : psbt) : bytes :=
+  match p with
+  | Psbt g _ im om => magic ++ serialize_map g ++ flat_map serialize_map im ++ flat_map serialize_map om
+  end.
+
+(** ** BIP 143 native P2WPKH, SIGHASH_ALL *)
+dsha256 (b : bytes) : bytes := sha256_of_bytes (sha256_of_bytes b).
+
+(** a witness UTXO value: 8-byte amount and a scriptPubKey, nothing else *)
+parse_witness_utxo (v : bytes) : outcome (bytes * bytes) :=
+  bind (take 8 v) (fun p => let (amount, r) := p in
+    bind (read_amount amount) (fun _ =>
+      bind (read_var max_script_bytes ScriptTooLarge r) (fun p => let (script, r2) := p in
+        match r2 with [] => Done (amount, script) | _ => Fail MalformedWitnessUtxo end))).
+
+(** OP_0 PUSH20 <20-byte key hash> *)
+p2wpkh_hash (script : bytes) : outcome bytes :=
+  if andb (bytes_eqb (firstn 2 script) [0, 20]) (eqb (len script) 22)
+  then Done (skipn 2 script) else Fail UnsupportedScript.
+
+sighash_all_ok (m : psbt_map) : outcome unit :=
+  match lookup [3] m with
+  | None => Done tt
+  | Some v => if bytes_eqb v [1, 0, 0, 0] then Done tt else Fail UnsupportedSighash
+  end.
+
+input_prevout (i : tx_input) : bytes := match i with TxIn p _ => p end.
+input_sequence (i : tx_input) : bytes := match i with TxIn _ s => s end.
+
+(** the 32-byte digest a signature of input [index] commits to *)
+p2wpkh_sighash_all (p : psbt) (index : nat) : outcome bytes :=
+  match p with
+  | Psbt _ (Tx version ins outs locktime) im _ =>
+      match nth_error ins index, nth_error im index with
+      | Some i, Some m =>
+          bind (sighash_all_ok m) (fun _ =>
+          match lookup [1] m with
+          | None => Fail MissingWitnessUtxo
+          | Some wu =>
+              bind (parse_witness_utxo wu) (fun q => let (amount, script) := q in
+              bind (p2wpkh_hash script) (fun h =>
+                Done (dsha256 (le_bytes 4 version
+                  ++ dsha256 (flat_map input_prevout ins)
+                  ++ dsha256 (flat_map input_sequence ins)
+                  ++ input_prevout i
+                  ++ [25, 118, 169, 20] ++ h ++ [136, 172]
+                  ++ amount
+                  ++ input_sequence i
+                  ++ dsha256 (serialize_outputs outs)
+                  ++ le_bytes 4 locktime
+                  ++ [1, 0, 0, 0]))))
+          end)
+      | _, _ => Fail InputIndexOutOfRange
+      end
+  end.

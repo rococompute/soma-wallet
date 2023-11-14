@@ -1,0 +1,28 @@
+Import wallet_psbt.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+hex (s : string) : bytes := match bytes_of_hex s with Some l => l | None => [] end.
+
+(** BIP 143 "Native P2WPKH" example: its unsigned transaction, and input 1's
+    P2WPKH scriptPubKey and 6 BTC amount as a PSBT v0 witness UTXO.
+    PSBT framing per BIP 174; tests/test_psbt_vectors.py rebuilds these
+    bytes and recomputes the digest independently with hashlib. *)
+unsigned_hex : string := "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac11000000".
+unsigned : bytes := hex unsigned_hex.
+witness_utxo : bytes := hex "0046c323000000001600141d0f172a0ecb48aee1be1f2687d2963ae33f71a1".
+fixture : bytes := hex ("70736274ff0100a0" ++ unsigned_hex ++ "000001011f0046c323000000001600141d0f172a0ecb48aee1be1f2687d2963ae33f71a1000000").
+expected_sighash : bytes := hex "c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670".
+
+kv (k v : bytes) : bytes := encode_var k ++ encode_var v.
+global_tx : bytes := kv [0] unsigned.
+in1 : bytes := kv [1] witness_utxo.
+build (global inputs : bytes) : bytes := magic ++ global ++ [0] ++ inputs ++ [0, 0, 0].
+
+parsed : outcome psbt := parse_psbt fixture.
+digest_at (p : outcome psbt) (i : nat) : outcome bytes := bind p (fun q => p2wpkh_sighash_all q i).
+error_of {A : Type} (r : outcome A) : option parse_error := match r with Done _ => None | Fail e => Some e end.
+round_trip : outcome bytes := bind parsed (fun q => Done (serialize_psbt q)).
+fields : outcome (int * nat * list int * int) := bind (parse_tx unsigned) (fun t =>
+  match t with Tx v ins outs lt => Done (v, length ins, map (fun o => match o with TxOut a _ => a end) outs, lt) end).
