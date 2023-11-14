@@ -1,0 +1,107 @@
+(** Pure signing-session policy. References are handles owned by a future
+    trusted key store / PSBT parser; none contain key or transaction bytes.
+    This module does not import Sandbox, perform IO, parse, or sign.
+    Callers must replace their single authoritative state with each successful
+    result; immutable old values are not linear capabilities. *)
+
+Inductive key_ref := KeyRef (handle : nat).
+Inductive psbt_ref := ParsedPsbtRef (handle : nat) (digest : string).
+Inductive signed_psbt_ref := SignedPsbtRef (handle : nat) (source : psbt_ref).
+Inductive approval := ApprovalFor (reviewed : psbt_ref).
+Inductive sign_permission := SignPermission (key : key_ref) (transaction : psbt_ref).
+
+same_psbt (a b : psbt_ref) : bool :=
+  match a, b with
+  | ParsedPsbtRef ah ad, ParsedPsbtRef bh bd => Nat.eqb ah bh && String.eqb ad bd
+  end.
+
+Inductive session :=
+| Locked
+| KeyImported (key : key_ref)
+| PsbtLoaded (key : key_ref) (transaction : psbt_ref)
+| Approved (key : key_ref) (transaction : psbt_ref) (consent : approval)
+| Signing (permission : sign_permission)
+| Signed (output : signed_psbt_ref).
+
+Inductive session_error :=
+| NoKey | NoPsbt | NotApproved | ApprovalForDifferentPsbt
+| ApprovalConsumed | AlreadySigned | SignNotRequested | SignedForDifferentPsbt.
+Inductive transition_result := Ok (next : session) | Err (error : session_error).
+
+active_key (s : session) : option key_ref :=
+  match s with
+  | Locked => None
+  | KeyImported k => Some k
+  | PsbtLoaded k _ => Some k
+  | Approved k _ _ => Some k
+  | Signing (SignPermission k _) => Some k
+  | Signed _ => None
+  end.
+
+(** Importing a key starts a new session, even when its handle is unchanged. *)
+import_key (s : session) (key : key_ref) : transition_result := Ok (KeyImported key).
+
+(** Every load invalidates consent, including a reload of the same PSBT.
+    Replacing a pending request also discards its permission. *)
+load_psbt (s : session) (transaction : psbt_ref) : transition_result :=
+  match s with
+  | Locked => Err NoKey
+  | KeyImported k => Ok (PsbtLoaded k transaction)
+  | PsbtLoaded k _ => Ok (PsbtLoaded k transaction)
+  | Approved k _ _ => Ok (PsbtLoaded k transaction)
+  | Signing (SignPermission k _) => Ok (PsbtLoaded k transaction)
+  | Signed _ => Err AlreadySigned
+  end.
+
+(** Called only after an explicit review event, with the exact reviewed ref.
+    Approval is not refreshed by requesting or completing a signature. *)
+approve (s : session) (reviewed : psbt_ref) : transition_result :=
+  match s with
+  | Locked => Err NoKey
+  | KeyImported _ => Err NoPsbt
+  | PsbtLoaded k p =>
+      if same_psbt reviewed p then Ok (Approved k p (ApprovalFor reviewed))
+      else Err ApprovalForDifferentPsbt
+  | Approved k p _ =>
+      if same_psbt reviewed p then Ok (Approved k p (ApprovalFor reviewed))
+      else Err ApprovalForDifferentPsbt
+  | Signing _ => Err ApprovalConsumed
+  | Signed _ => Err AlreadySigned
+  end.
+
+(** A successful request IS the next state: Signing carries the permission
+    and no approval. It authorizes a future signer, not a fake signature. *)
+sign_request (s : session) : transition_result :=
+  match s with
+  | Locked => Err NoKey
+  | KeyImported _ => Err NoPsbt
+  | PsbtLoaded _ _ => Err NotApproved
+  | Approved k p (ApprovalFor reviewed) =>
+      if same_psbt reviewed p then Ok (Signing (SignPermission k p))
+      else Err ApprovalForDifferentPsbt
+  | Signing _ => Err ApprovalConsumed
+  | Signed _ => Err AlreadySigned
+  end.
+
+(** The future cryptographic signer supplies a verified output reference.
+    No bytes or signature are generated here. Only an outstanding request
+    can complete, and its source must match. Signed retains no active key. *)
+complete_sign (s : session) (output : signed_psbt_ref) : transition_result :=
+  match s with
+  | Locked => Err NoKey
+  | KeyImported _ => Err NoPsbt
+  | PsbtLoaded _ _ => Err NotApproved
+  | Approved _ _ _ => Err SignNotRequested
+  | Signing (SignPermission _ p) =>
+      match output with
+      | SignedPsbtRef _ source =>
+          if same_psbt source p then Ok (Signed output)
+          else Err SignedForDifferentPsbt
+      end
+  | Signed _ => Err AlreadySigned
+  end.
+
+(** Lock/reset always discards the key, approval and pending permission.
+    Releasing/zeroing actual key-store memory is future IO integration work. *)
+lock (s : session) : session := Locked.
+reset (s : session) : session := lock s.

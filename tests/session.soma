@@ -1,0 +1,31 @@
+Import wallet_session.
+
+(** Abstract public test handles only: no key bytes and no parsed-PSBT claim. *)
+key_a : key_ref := KeyRef 1.
+key_b : key_ref := KeyRef 2.
+psbt_a : psbt_ref := ParsedPsbtRef 10 "fixture-a".
+psbt_b : psbt_ref := ParsedPsbtRef 11 "fixture-b".
+output_a : signed_psbt_ref := SignedPsbtRef 20 psbt_a.
+
+(** Chain only successful transitions. Errors propagate, never silently
+    becoming a successful state. The equalities below fail the build on
+    any mismatch, so no runtime/output assertion adapter is needed. *)
+then_load (r : transition_result) (p : psbt_ref) : transition_result :=
+  match r with Ok s => load_psbt s p | Err e => Err e end.
+then_approve (r : transition_result) (p : psbt_ref) : transition_result :=
+  match r with Ok s => approve s p | Err e => Err e end.
+then_request (r : transition_result) : transition_result :=
+  match r with Ok s => sign_request s | Err e => Err e end.
+then_complete (r : transition_result) (o : signed_psbt_ref) : transition_result :=
+  match r with Ok s => complete_sign s o | Err e => Err e end.
+
+imported : transition_result := import_key Locked key_a.
+loaded : transition_result := then_load imported psbt_a.
+reviewed : transition_result := then_approve loaded psbt_a.
+requested : transition_result := then_request reviewed.
+finished : transition_result := then_complete requested output_a.
+
+all_states : list session := [Locked, KeyImported key_a,
+  PsbtLoaded key_a psbt_a, Approved key_a psbt_a (ApprovalFor psbt_a),
+  Signing (SignPermission key_a psbt_a), Signed output_a].
+

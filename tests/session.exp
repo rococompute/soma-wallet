@@ -1,0 +1,58 @@
+(** Build-failing checked expectations for tests/session.soma. *)
+Theorem happy_path :
+  imported = Ok (KeyImported key_a) /\
+  loaded = Ok (PsbtLoaded key_a psbt_a) /\
+  reviewed = Ok (Approved key_a psbt_a (ApprovalFor psbt_a)) /\
+  requested = Ok (Signing (SignPermission key_a psbt_a)) /\
+  finished = Ok (Signed output_a).
+Proof. repeat split; reflexivity. Qed.
+
+Theorem missing_prerequisites :
+  sign_request Locked = Err NoKey /\
+  then_request imported = Err NoPsbt /\
+  then_request loaded = Err NotApproved /\
+  approve Locked psbt_a = Err NoKey /\
+  approve (KeyImported key_a) psbt_a = Err NoPsbt /\
+  load_psbt Locked psbt_a = Err NoKey.
+Proof. repeat split; reflexivity. Qed.
+
+Theorem different_approval_is_rejected :
+  approve (PsbtLoaded key_a psbt_a) psbt_b = Err ApprovalForDifferentPsbt /\
+  sign_request (Approved key_a psbt_a (ApprovalFor psbt_b)) = Err ApprovalForDifferentPsbt /\
+  sign_request (Approved key_a psbt_a (ApprovalFor (ParsedPsbtRef 10 "changed-digest"))) = Err ApprovalForDifferentPsbt /\
+  sign_request (Approved key_a psbt_a (ApprovalFor (ParsedPsbtRef 99 "fixture-a"))) = Err ApprovalForDifferentPsbt.
+Proof. repeat split; reflexivity. Qed.
+
+Theorem load_and_import_require_new_approval :
+  then_request (then_load reviewed psbt_b) = Err NotApproved /\
+  then_request (then_load reviewed psbt_a) = Err NotApproved /\
+  sign_request (KeyImported key_b) = Err NoPsbt /\
+  then_request (import_key (Approved key_a psbt_a (ApprovalFor psbt_a)) key_b) = Err NoPsbt /\
+  then_request (import_key (Approved key_a psbt_a (ApprovalFor psbt_a)) key_a) = Err NoPsbt.
+Proof. repeat split; reflexivity. Qed.
+
+Theorem approval_is_one_shot :
+  then_request requested = Err ApprovalConsumed /\
+  then_approve requested psbt_a = Err ApprovalConsumed /\
+  then_request finished = Err AlreadySigned /\
+  then_complete finished output_a = Err AlreadySigned /\
+  then_complete reviewed output_a = Err SignNotRequested /\
+  then_complete requested (SignedPsbtRef 21 psbt_b) = Err SignedForDifferentPsbt.
+Proof. repeat split; reflexivity. Qed.
+
+Theorem stale_completion_cannot_finish_replaced_session :
+  then_complete (then_load requested psbt_b) output_a = Err NotApproved /\
+  then_complete (import_key (Signing (SignPermission key_a psbt_a)) key_b) output_a = Err NoPsbt.
+Proof. repeat split; reflexivity. Qed.
+
+Theorem lock_each_state :
+  List.map lock all_states = [Locked, Locked, Locked, Locked, Locked, Locked] /\
+  List.map (fun s => active_key (lock s)) all_states = [None, None, None, None, None, None] /\
+  List.map (fun s => sign_request (lock s)) all_states =
+    [Err NoKey, Err NoKey, Err NoKey, Err NoKey, Err NoKey, Err NoKey] /\
+  List.map (fun s => complete_sign (lock s) output_a) all_states =
+    [Err NoKey, Err NoKey, Err NoKey, Err NoKey, Err NoKey, Err NoKey].
+Proof. repeat split; reflexivity. Qed.
+
+Theorem signed_has_no_active_key : active_key (Signed output_a) = None.
+Proof. reflexivity. Qed.

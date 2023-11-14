@@ -11,6 +11,29 @@ public key, signed and verified a digest with Bitcoin Core libsecp256k1, rejecte
 a modified signature, and rejected a zero private key. The proof-of-capability
 code is in `crypto/`; it uses the public scalar-one test key, not a wallet key.
 
+## Session policy model
+
+`wallet_session.soma` is a pure, typed state machine, separate from the served page.
+It moves through Locked, KeyImported, PsbtLoaded, Approved, Signing (a pending
+permission with approval consumed), and Signed. It holds opaque numeric key
+handles and parsed/signed PSBT references only. The PSBT reference binds a parser
+handle and an exact-content digest; their production and validation belong to
+the future trusted parser/key-store integration. No key bytes are represented.
+
+A review event approves the exact PSBT reference. Loading a PSBT (even the same
+one) or importing a key discards prior approval; requesting signing consumes it.
+Completion accepts an external signed-result reference for the pending PSBT.
+Lock/reset drops every reference and permission. `wallet_session.exp` proves general
+policy properties, and `tests/session.soma` checks the happy path and rejected
+transitions with proof-checked equalities in `./scripts/check`.
+
+This is a state machine only: key import, parsing, cryptographic signing and
+export remain unavailable in the UI. `complete_sign` neither creates nor verifies
+signatures. A future IO driver must own one authoritative session, replace it
+with each successful result, serialize events, and never reuse old immutable
+states or accept model constructors from clients. It must release/erase key-store
+material on lock; dropping a handle alone is not secret-memory erasure.
+
 ## Development
 
 Requires the existing local Soma checkout/toolchain, opam switch `hvf` with the

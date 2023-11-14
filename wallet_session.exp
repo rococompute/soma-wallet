@@ -1,0 +1,47 @@
+(** These are kernel-checked for all states, not only sample transitions. *)
+Theorem lock_clears : forall s, lock s = Locked.
+Proof. reflexivity. Qed.
+
+Theorem lock_has_no_key : forall s, active_key (lock s) = None.
+Proof. reflexivity. Qed.
+
+Theorem reset_clears : forall s, reset s = Locked.
+Proof. reflexivity. Qed.
+
+Theorem locked_cannot_sign : forall s, sign_request (lock s) = Err NoKey.
+Proof. reflexivity. Qed.
+
+Theorem import_invalidates : forall s k, import_key s k = Ok (KeyImported k).
+Proof. reflexivity. Qed.
+
+Theorem load_invalidates : forall k p consent next,
+  load_psbt (Approved k p consent) next = Ok (PsbtLoaded k next).
+Proof. reflexivity. Qed.
+
+Theorem request_consumes : forall permission,
+  sign_request (Signing permission) = Err ApprovalConsumed.
+Proof. reflexivity. Qed.
+
+Theorem signed_cannot_sign : forall output,
+  sign_request (Signed output) = Err AlreadySigned.
+Proof. reflexivity. Qed.
+
+Theorem approval_must_match : forall k p reviewed,
+  same_psbt reviewed p = false ->
+  sign_request (Approved k p (ApprovalFor reviewed)) = Err ApprovalForDifferentPsbt.
+Proof.
+  intros k p reviewed different. unfold sign_request. rewrite different. reflexivity.
+Qed.
+
+Theorem permission_requires_approval : forall s permission,
+  sign_request s = Ok (Signing permission) ->
+  exists k p reviewed,
+    s = Approved k p (ApprovalFor reviewed) /\
+    same_psbt reviewed p = true /\ permission = SignPermission k p.
+Proof.
+  intros s permission accepted.
+  destruct s as [|k|k p|k p [reviewed]|pending|output]; simpl in accepted; try discriminate.
+  destruct (same_psbt reviewed p) eqn:matches; try discriminate.
+  inversion accepted; subst.
+  exists k, p, reviewed. repeat split; reflexivity || assumption.
+Qed.
