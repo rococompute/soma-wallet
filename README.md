@@ -60,7 +60,14 @@ digest `c37af311...`) framed as a PSBT, and the rejections;
 boundary, conflicting-metadata and unknown-entry round-trip checks, and
 `tests/test_psbt_vectors.py` recomputes the BIP 143 digest independently
 with hashlib. Fixture provenance: BIP 143's published native-P2WPKH example,
-framed per BIP 174 (both at bitcoin/bips). Not yet: base64 input, BIP 174's
+framed per BIP 174 (both at bitcoin/bips). Strict Base64 text input is
+accepted by `parse_psbt_base64`: canonical padded Base64 only (including
+zero unused trailing bits in the final group, so encodings cannot alias),
+decoded four characters at a time and rejected with `InputTooLarge` as
+soon as the decoded length would exceed the PSBT limit, with typed
+`InvalidBase64Char`/`InvalidBase64Padding` errors (checked in
+`tests/psbt_base64.soma`/`.exp` and `tests/test_psbt_base64.py`).
+Not yet: BIP 174's
 published base64 PSBT vector suite vendored verbatim, P2SH/P2WSH or
 non-witness-UTXO digest policies, and wiring into the UI or signer.
 

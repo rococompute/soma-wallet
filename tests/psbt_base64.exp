@@ -1,0 +1,28 @@
+(** Build-failing checked expectations for tests/psbt_base64.soma. *)
+Theorem base64_examples :
+  base64_decode [84, 87, 70, 117] = Done [77, 97, 110] /\
+  base64_decode [84, 87, 69, 61] = Done [77, 97] /\
+  base64_decode [84, 81, 61, 61] = Done [77] /\
+  base64_decode [] = Done [].
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem base64_round_trip : round_trip_b64 = Done fixture.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem base64_rejections :
+  error_of (base64_decode [84, 87, 42, 117]) = Some InvalidBase64Char /\
+  error_of (base64_decode [84, 61, 70, 117]) = Some InvalidBase64Padding /\
+  error_of (base64_decode [84, 87, 70]) = Some InvalidBase64Padding /\
+  error_of (base64_decode [84, 81, 61, 61, 81, 81, 61, 61]) = Some InvalidBase64Padding /\
+  error_of (base64_decode [61, 61, 61, 61]) = Some InvalidBase64Padding /\
+  error_of (parse_psbt_base64 [84, 87, 70, 117]) = Some BadMagic.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** Noncanonical trailing bits must not alias the canonical encoding:
+    TR== would decode like TQ== and TWF= like TWE= without these checks. *)
+Theorem base64_noncanonical_padding :
+  error_of (base64_decode [84, 82, 61, 61]) = Some InvalidBase64Padding /\
+  error_of (base64_decode [84, 87, 70, 61]) = Some InvalidBase64Padding /\
+  base64_decode [84, 81, 61, 61] = Done [77] /\
+  base64_decode [84, 87, 69, 61] = Done [77, 97].
+Proof. vm_compute. repeat split; reflexivity. Qed.

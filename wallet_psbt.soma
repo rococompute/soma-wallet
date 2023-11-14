@@ -53,7 +53,9 @@ Inductive parse_error :=
 | TotalAmountOutOfRange
 | UnsupportedNonWitnessUtxo
 | UnsupportedRedeemScript
-| UnsupportedWitnessScript.
+| UnsupportedWitnessScript
+| InvalidBase64Char
+| InvalidBase64Padding.
 
 Inductive outcome (A : Type) := Done (value : A) | Fail (error : parse_error).
 Arguments Done {A} value.
@@ -361,3 +363,64 @@ p2wpkh_sighash_all (p : psbt) (index : nat) : outcome bytes :=
       | _, _ => Fail InputIndexOutOfRange
       end
   end.
+
+(** ** Strict Base64 text form (BIP 174), bounded and canonical
+
+    Decoding consumes four characters at a time and fails with
+    [InputTooLarge] as soon as the decoded length would exceed
+    [max_psbt_bytes], so an over-long input is rejected after a bounded
+    prefix rather than after a whole-input allocation or scan in this
+    module. Only canonical padded Base64 is accepted: in a one-byte
+    group the unused low four bits of the second value must be zero,
+    and in a two-byte group the unused low two bits of the third value
+    must be zero, so distinct encodings cannot alias the same bytes. *)
+b64_value (c : int) : int :=
+  if andb (negb (ltb c 65)) (negb (ltb 90 c)) then sub c 65
+  else if andb (negb (ltb c 97)) (negb (ltb 122 c)) then add (sub c 97) 26
+  else if andb (negb (ltb c 48)) (negb (ltb 57 c)) then add (sub c 48) 52
+  else if eqb c 43 then 62
+  else if eqb c 47 then 63
+  else if eqb c 61 then 64
+  else 999.
+
+Fixpoint b64_groups (chars : bytes) (acc : bytes) (count : int) : outcome bytes :=
+  match chars with
+  | [] => Done (rev acc)
+  | a :: b :: c :: d :: rest =>
+      let va := b64_value a in
+      let vb := b64_value b in
+      let vc := b64_value c in
+      let vd := b64_value d in
+      if orb (orb (eqb va 999) (eqb vb 999)) (orb (eqb vc 999) (eqb vd 999))
+      then Fail InvalidBase64Char
+      else if orb (eqb va 64) (eqb vb 64) then Fail InvalidBase64Padding
+      else if eqb vc 64 then
+        if negb (eqb vd 64) then Fail InvalidBase64Padding
+        else if negb (eqb (land vb 15) 0) then Fail InvalidBase64Padding
+        else match rest with
+             | [] => if ltb max_psbt_bytes (add count 1) then Fail InputTooLarge
+                     else Done (rev (lor (lsl va 2) (lsr vb 4) :: acc))
+             | _ => Fail InvalidBase64Padding
+             end
+      else if eqb vd 64 then
+        if negb (eqb (land vc 3) 0) then Fail InvalidBase64Padding
+        else match rest with
+             | [] => if ltb max_psbt_bytes (add count 2) then Fail InputTooLarge
+                     else Done (rev (lor (lsl (land vb 15) 4) (lsr vc 2)
+                                     :: lor (lsl va 2) (lsr vb 4) :: acc))
+             | _ => Fail InvalidBase64Padding
+             end
+      else if ltb max_psbt_bytes (add count 3) then Fail InputTooLarge
+      else b64_groups rest
+             (lor (lsl (land vc 3) 6) vd
+              :: lor (lsl (land vb 15) 4) (lsr vc 2)
+              :: lor (lsl va 2) (lsr vb 4) :: acc)
+             (add count 3)
+  | _ => Fail InvalidBase64Padding
+  end.
+
+base64_decode (chars : bytes) : outcome bytes := b64_groups chars [] 0.
+
+(** Parse a PSBT in its strict Base64 text form (ASCII bytes). *)
+parse_psbt_base64 (chars : bytes) : outcome psbt :=
+  bind (base64_decode chars) (fun raw => parse_psbt raw).
