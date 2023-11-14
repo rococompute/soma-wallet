@@ -1,0 +1,8 @@
+Import wallet_session.
+
+(** The first .plan line restated as general theorems over the actual
+    wallet_session transition functions; see tests/session_plan_line.exp.
+    Only the small public handles below are concrete witnesses. *)
+witness_key : key_ref := KeyRef 1.
+witness_psbt : psbt_ref := ParsedPsbtRef 2 "plan-line-witness".
+witness_other : psbt_ref := ParsedPsbtRef 3 "plan-line-other".

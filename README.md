@@ -284,6 +284,11 @@ accepting the build; these are build-failing equalities, not expected log text.
 | Completion belongs to the pending request | `complete_sign` accepts only `Signing` and a signed-result reference whose source matches its pending PSBT. An approved state cannot skip the request step. `Signed` has no model-active key. | `approval_is_one_shot` covers premature completion, mismatched source and repeated completion; `signed_has_no_active_key`. |
 | Lock/reset drop key references and consent | `lock` returns `Locked` for every state; `reset` delegates to it. `Locked` contains no key, PSBT, approval, output or pending permission. | General `lock_clears`, `lock_has_no_key`, `reset_clears` and `locked_cannot_sign`; `lock_each_state` also checks completion refusal across every constructor. |
 
+`tests/session_plan_line.soma` / `.exp` restates the whole first plan line as
+general theorems over these functions (each prerequisite refusal, signing only
+from exact approval, consumed approval, unapproved load/import, lock/reset
+clearing every state), reusing the `wallet_session.exp` lemmas above.
+
 ### Where reference validity and runtime ownership come from
 
 `KeyRef` and `ParsedPsbtRef` are public, constructible model values. Their names

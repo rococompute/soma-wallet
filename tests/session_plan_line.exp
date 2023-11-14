@@ -1,0 +1,109 @@
+(** The first .plan line, clause by clause, for all states and references:
+    "signing requires a key, a parsed PSBT, and fresh explicit approval;
+    locking invalidates approval and the active key reference."
+    Existing wallet_session.exp lemmas are reused where they state a clause. *)
+
+(** Clause 1a: each missing prerequisite refuses with its own error, and
+    approval for a different PSBT reference never authorizes signing. *)
+Theorem plan_sign_refuses_missing_prerequisites :
+  sign_request Locked = Err NoKey /\
+  (forall k, sign_request (KeyImported k) = Err NoPsbt) /\
+  (forall k p, sign_request (PsbtLoaded k p) = Err NotApproved) /\
+  (forall k p reviewed, same_psbt reviewed p = false ->
+     sign_request (Approved k p (ApprovalFor reviewed)) = Err ApprovalForDifferentPsbt).
+Proof.
+  split; [reflexivity|].
+  split; [intros; reflexivity|].
+  split; [intros; reflexivity|].
+  exact approval_must_match.
+Qed.
+
+(** Clause 1b: the only successful signing request comes from Approved with
+    consent naming exactly the loaded reference, and yields Signing for
+    that key and reference (generalizes permission_requires_approval to any
+    successful result). *)
+Theorem plan_sign_only_from_exact_approval : forall s next,
+  sign_request s = Ok next ->
+  exists k p reviewed,
+    s = Approved k p (ApprovalFor reviewed) /\
+    same_psbt reviewed p = true /\
+    next = Signing (SignPermission k p).
+Proof.
+  intros s next accepted.
+  destruct s as [|k|k p|k p [reviewed]|pending|output];
+    simpl in accepted; try discriminate.
+  destruct (same_psbt reviewed p) eqn:matches; try discriminate.
+  inversion accepted; subst.
+  exists k, p, reviewed.
+  split; [reflexivity|].
+  split; [exact matches|reflexivity].
+Qed.
+
+(** Clause 2: a successful request consumes the approval. The resulting
+    state refuses a second request and refuses re-approval. *)
+Theorem plan_request_consumes_approval : forall s next,
+  sign_request s = Ok next ->
+  sign_request next = Err ApprovalConsumed /\
+  (forall r, approve next r = Err ApprovalConsumed).
+Proof.
+  intros s next accepted.
+  destruct (plan_sign_only_from_exact_approval s next accepted)
+    as [k [p [reviewed [_ [_ ->]]]]].
+  split; [reflexivity|intros; reflexivity].
+Qed.
+
+(** Clause 3 (freshness): every successful load, including an identical
+    reload and a reload over pending work, keeps the active key but yields
+    an unapproved PsbtLoaded state that refuses signing. *)
+Theorem plan_load_is_unapproved : forall s p next,
+  load_psbt s p = Ok next ->
+  exists k,
+    active_key s = Some k /\
+    next = PsbtLoaded k p /\
+    sign_request next = Err NotApproved.
+Proof.
+  intros s p next loaded.
+  destruct s as [|k|k q|k q consent|[k q]|output];
+    simpl in loaded; try discriminate;
+    inversion loaded; subst; exists k;
+    (split; [reflexivity|split; reflexivity]).
+Qed.
+
+(** Clause 3 (freshness): importing a key, even the same handle, always
+    starts an unapproved session with no PSBT (reuses import_invalidates). *)
+Theorem plan_import_is_unapproved : forall s k,
+  import_key s k = Ok (KeyImported k) /\
+  active_key (KeyImported k) = Some k /\
+  sign_request (KeyImported k) = Err NoPsbt.
+Proof.
+  intros s k.
+  split; [exact (import_invalidates s k)|].
+  split; reflexivity.
+Qed.
+
+(** Clause 4: lock and reset yield Locked from every state. Locked holds no
+    active key reference and refuses signing, approval, completion and
+    loading (reuses lock_clears, reset_clears and lock_has_no_key). *)
+Theorem plan_lock_invalidates_everything : forall s r o,
+  lock s = Locked /\ reset s = Locked /\
+  active_key (lock s) = None /\ active_key (reset s) = None /\
+  sign_request (lock s) = Err NoKey /\ sign_request (reset s) = Err NoKey /\
+  approve (lock s) r = Err NoKey /\ approve (reset s) r = Err NoKey /\
+  complete_sign (lock s) o = Err NoKey /\ load_psbt (lock s) r = Err NoKey.
+Proof.
+  intros s r o.
+  split; [exact (lock_clears s)|].
+  split; [exact (reset_clears s)|].
+  split; [exact (lock_has_no_key s)|].
+  repeat split; reflexivity.
+Qed.
+
+(** Concrete witness: fresh explicit approval of the exact loaded reference
+    is what makes signing succeed, and approving another reference fails. *)
+Theorem plan_witness_fresh_approval :
+  approve (PsbtLoaded witness_key witness_psbt) witness_other = Err ApprovalForDifferentPsbt /\
+  approve (PsbtLoaded witness_key witness_psbt) witness_psbt =
+    Ok (Approved witness_key witness_psbt (ApprovalFor witness_psbt)) /\
+  sign_request (Approved witness_key witness_psbt (ApprovalFor witness_psbt)) =
+    Ok (Signing (SignPermission witness_key witness_psbt)).
+Proof. repeat split; reflexivity. Qed.
