@@ -81,6 +81,7 @@ return a bounded byte, but boot also reported `no CPU RNG bootstrap`; this patch
 does not establish the quality/source of its initial seed or restart uniqueness.
 It does not substitute timestamps, deterministic PRNGs or fixtures for entropy.
 A verified, seeded signer entropy path is required before enabling real sealing.
+"Signer entropy evidence" below records what has since been verified about that seed.
 
 The bridge bounds passphrases to 1..128 bytes and keys to 32 bytes, tracks every
 staged byte, and clears staged passwords, scalars, derived keys and KDF workspace
@@ -171,6 +172,47 @@ production KDF/AEAD execution and hardware calibration, authenticated open befor
 exposing plaintext, signer/session ownership and erase-on-lock, then encrypted
 persistence with actual restart tests and UI unlock. Persistence remains disabled
 and this remains a development-only format proposal.
+
+## Signer entropy evidence (probe only; sealing still disabled)
+
+`Sandbox.random` in a booted image draws from mirage-crypto's Fortuna. The
+generator is set up by `Mirage_crypto_rng_mirage.initialize` in every generated
+unikernel. The runtime installed here uses a mirage-crypto build in which
+`initialize` first asks the tender for 32 host bytes through the
+`solo5_random` hypercall. If the tender provides them, those bytes seed Fortuna
+and the host pools keep being refilled once a second. If not, it logs
+`no host entropy (solo5_random unavailable)` and falls back to the CPU RNG,
+which Apple silicon lacks (hence `no CPU RNG bootstrap`), or to timing-based
+whirlwind seeding. In the installed solo5 `hvt` tender
+(`tenders/hvt/hvt_core.c`), `hypercall_random` fills the buffer with
+`arc4random_buf` on macOS and `getrandom` on Linux. `--no-random` turns that
+off.
+
+`tests/entropy_probe.soma` draws two 32-byte blocks at runtime and prints them.
+They are throwaway probe values, never used as a key, salt or nonce.
+`tests/test_entropy_probe.py` boots it three times with the normal tender and
+once with `--no-random`. It checks that:
+
+- normal boots never log the fallback message, while the `--no-random` control
+  does, so the check is not vacuous;
+- all eight blocks differ, both within one boot and across restarts;
+- no block is constant or counter-like (an arithmetic progression, or fewer
+  than 16 distinct bytes), and the byte distribution is not grossly skewed.
+
+What this verifies: under the normal tender, the signer's Fortuna is seeded and
+refreshed from the host OS CSPRNG, and its output varies across restarts.
+
+What it does not verify: statistical randomness (no test suite was run), the
+host CSPRNG itself, behavior under tenders without the random feature (they
+silently fall back to weaker seeding), and any guarantee that the image is
+always run without `--no-random`. A production salt/nonce path must therefore
+require host entropy: it should fail closed when `solo5_random` is unavailable
+rather than rely on the fallback. Sandbox does not currently report which seed
+was used, and the reseed time and source mix are internal to mirage-crypto.
+
+Nothing here produces production salts or nonces. Production sealing
+(`vault_seal`), signer key lifecycle integration and persistence all remain
+disabled.
 
 
 ## Session policy model

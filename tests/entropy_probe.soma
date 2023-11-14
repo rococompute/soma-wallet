@@ -1,0 +1,31 @@
+Require Import Sandbox.
+
+(** Runtime entropy probe for the signer image. It draws two 32-byte blocks
+    from Sandbox.random (Mirage_crypto_rng Fortuna inside the unikernel) and
+    prints them so tests/test_entropy_probe.py can compare draws within and
+    across boots. These bytes are throwaway probe output: they are never used
+    as a key, salt or nonce, and nothing seals or persists anything here. *)
+nibble (n : nat) : string :=
+  match n with
+  | 0 => "0" | 1 => "1" | 2 => "2" | 3 => "3" | 4 => "4" | 5 => "5"
+  | 6 => "6" | 7 => "7" | 8 => "8" | 9 => "9" | 10 => "a" | 11 => "b"
+  | 12 => "c" | 13 => "d" | 14 => "e" | _ => "f"
+  end.
+hex_byte (b : nat) : string := String.append (nibble (Nat.div b 16)) (nibble (Nat.modulo b 16)).
+
+Fixpoint draw_hex (remaining : nat) (acc : string) : io string :=
+  match remaining with
+  | O => ret acc
+  | S more => b <- random 256 ;; draw_hex more (String.append acc (hex_byte b))
+  end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | ["draw"] =>
+      first <- draw_hex 32 "" ;;
+      second <- draw_hex 32 "" ;;
+      print (String.append "ENTROPY_BLOCK=" first) ;;
+      print (String.append "ENTROPY_BLOCK=" second)
+  | _ => exit 1
+  end.
