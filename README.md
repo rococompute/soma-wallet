@@ -95,6 +95,22 @@ scalar-one fixtures and RIPEMD-160 vectors) and independently recomputed by
 `tests/test_keys.py`. Not yet wired to key entry, the session driver or PSBT
 signing; no browser key entry, HTTP signing endpoint or persistence was added.
 
+## Published BIP 174 vectors and key-data rules
+
+`tests/bip174.soma` checks BIP 174's published test vectors
+(https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki, "Test Vectors"),
+embedded as the hex of their Base64 strings; `tests/test_bip174_vectors.py` keeps
+the Base64 verbatim and checks every embedded byte. All 20 invalid vectors are
+rejected with their specific typed errors; the 8 valid vectors with inputs
+re-serialize to their exact bytes, and the first's transaction fields are checked;
+the two valid zero-input vectors are rejected by this wallet's policy (nothing to
+sign). Key-data lengths are checked for the key types BIP 174 and BIP 371 fix
+(pubkey-keyed partial signatures and BIP 32 paths, 78-byte global xpubs, hash
+preimages, Taproot keys); other key types are preserved unchanged. `parse_psbt`
+and `parse_tx` find their 100000-element bound by a walk of at most that length
+before any full scan. Not yet: BIP 371 control-block lengths and cross-checking
+non-witness UTXOs against their outpoints.
+
 ## Development
 
 Requires the existing local Soma checkout/toolchain, opam switch `hvf` with the

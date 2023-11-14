@@ -82,6 +82,13 @@ Fixpoint bytes_in_range (b : bytes) : bool :=
   | x :: r => andb (andb (negb (ltb x 0)) (negb (ltb 255 x))) (bytes_in_range r)
   end.
 
+(** at most [budget] elements, found by walking no further than that *)
+Fixpoint list_within {A : Type} (l : list A) (budget : int) : bool :=
+  match l with
+  | [] => true
+  | _ :: rest => if eqb budget 0 then false else list_within rest (sub budget 1)
+  end.
+
 (** little-endian value of at most 7 bytes (fits in 63 bits) *)
 le_value (b : bytes) : int := fold_right (fun x acc => lor x (lsl acc 8)) 0 b.
 
@@ -193,6 +200,7 @@ read_tx (b : bytes) : outcome (tx * bytes) :=
 
 (** the whole of [b] is one unsigned transaction *)
 parse_tx (b : bytes) : outcome tx :=
+  if negb (list_within b max_psbt_bytes) then Fail InputTooLarge else
   if negb (bytes_in_range b) then Fail ByteOutOfRange else
   bind (read_tx b) (fun p => let (t, r) := p in
     match r with [] => Done t | _ => Fail TrailingBytes end).
@@ -222,19 +230,29 @@ lookup (k : bytes) (m : psbt_map) : option bytes :=
   | None => None
   end.
 
-(** key types whose key data must be empty (BIP 174), per map *)
-single_byte_global : list int := [0, 251].
-single_byte_input : list int := [0, 1, 3, 4, 5, 7, 8].
-single_byte_output : list int := [0, 1].
+(** Allowed key-data lengths (the key after its type byte) of the key
+    types BIP 174 and BIP 371 fix, per map; other types are kept as they are. *)
+key_rules : Type := list (int * list int).
+pubkey_lengths : list int := [33, 65].
+global_key_rules : key_rules := [(0, [0]), (1, [78]), (251, [0])].
+input_key_rules : key_rules := [(0, [0]), (1, [0]), (2, pubkey_lengths), (3, [0]), (4, [0]),
+  (5, [0]), (6, pubkey_lengths), (7, [0]), (8, [0]), (10, [20]), (11, [32]), (12, [20]),
+  (13, [32]), (19, [0]), (20, [64]), (22, [32]), (23, [0]), (24, [0])].
+output_key_rules : key_rules := [(0, [0]), (1, [0]), (2, pubkey_lengths), (5, [0]), (6, [0]),
+  (7, [32])].
 
-key_ok (single : list int) (k : bytes) : bool :=
+key_ok (rules : key_rules) (k : bytes) : bool :=
   match k with
   | [] => false
-  | t :: rest => if existsb (eqb t) single then (match rest with [] => true | _ => false end) else true
+  | t :: rest =>
+      match find (fun r => eqb (fst r) t) rules with
+      | Some (_, lengths) => existsb (eqb (len rest)) lengths
+      | None => true
+      end
   end.
 
 (** one map: entries until the 0x00 separator; duplicate keys rejected *)
-Fixpoint read_map_acc (fuel : nat) (single : list int) (b : bytes) (acc : psbt_map)
+Fixpoint read_map_acc (fuel : nat) (single : key_rules) (b : bytes) (acc : psbt_map)
     : outcome (psbt_map * bytes) :=
   match fuel with
   | O => Fail TooManyEntries
@@ -251,7 +269,7 @@ Fixpoint read_map_acc (fuel : nat) (single : list int) (b : bytes) (acc : psbt_m
             end)))
   end.
 
-read_map (single : list int) (b : bytes) : outcome (psbt_map * bytes) :=
+read_map (single : key_rules) (b : bytes) : outcome (psbt_map * bytes) :=
   read_map_acc map_fuel single b [].
 
 serialize_map (m : psbt_map) : bytes :=
@@ -263,10 +281,10 @@ Inductive psbt := Psbt (global : psbt_map) (unsigned : tx)
 magic : bytes := [112, 115, 98, 116, 255].
 
 parse_psbt (b : bytes) : outcome psbt :=
+  if negb (list_within b max_psbt_bytes) then Fail InputTooLarge else
   if negb (bytes_in_range b) then Fail ByteOutOfRange else
-  if ltb max_psbt_bytes (len b) then Fail InputTooLarge else
   if negb (bytes_eqb (firstn 5 b) magic) then Fail BadMagic else
-  bind (read_map single_byte_global (skipn 5 b)) (fun p => let (g, r) := p in
+  bind (read_map global_key_rules (skipn 5 b)) (fun p => let (g, r) := p in
     bind (match lookup [251] g with
           | Some v => if bytes_eqb v [0, 0, 0, 0] then Done tt else Fail UnsupportedPsbtVersion
           | None => Done tt
@@ -277,9 +295,9 @@ parse_psbt (b : bytes) : outcome psbt :=
         bind (parse_tx raw) (fun t =>
           match t with
           | Tx _ ins outs _ =>
-              bind (read_many count_fuel (read_map single_byte_input) (len ins) r [])
+              bind (read_many count_fuel (read_map input_key_rules) (len ins) r [])
                 (fun p => let (im, r2) := p in
-              bind (read_many count_fuel (read_map single_byte_output) (len outs) r2 [])
+              bind (read_many count_fuel (read_map output_key_rules) (len outs) r2 [])
                 (fun p => let (om, r3) := p in
               match r3 with
               | [] => Done (Psbt g t im om)

@@ -1,0 +1,32 @@
+(** Build-failing checked expectations for tests/bip174.soma. *)
+Theorem bip174_invalid_vectors_are_rejected :
+  invalid_results = [Some BadMagic, Some Truncated, Some NonEmptyScriptSig,
+    Some MissingUnsignedTx, Some DuplicateKey,
+    Some InvalidKeyLength, Some InvalidKeyLength, Some InvalidKeyLength,
+    Some InvalidKeyLength, Some InvalidKeyLength, Some InvalidKeyLength,
+    Some InvalidKeyLength, Some InvalidKeyLength, Some InvalidKeyLength,
+    Some InvalidKeyLength, Some InvalidKeyLength, Some InvalidKeyLength,
+    Some InvalidKeyLength, Some WitnessSerializedUnsignedTx,
+    Some UnsupportedTxVersion].
+Proof. vm_compute. reflexivity. Qed.
+
+(** every published valid PSBT with inputs re-serializes to its exact bytes *)
+Theorem bip174_valid_vectors_round_trip :
+  valid_round_trips = [true, true, true, true, true, true, true, true].
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem bip174_p2pkh_fields :
+  valid_20_fields = Done (2, 1%nat, [99999699, 100000000], 1257139) /\
+  valid_20_digest = Some UnsupportedNonWitnessUtxo.
+Proof. vm_compute. split; reflexivity. Qed.
+
+(** Valid in BIP 174 but outside this wallet's policy: without inputs there
+    is nothing to sign, so they are rejected explicitly. *)
+Theorem zero_input_vectors_are_unsupported :
+  zero_input_results = [Some UnsupportedTxVersion, Some NoInputs].
+Proof. vm_compute. reflexivity. Qed.
+
+(** the size bound is found by a walk of at most the bound *)
+Theorem bounded_walk :
+  list_within [1, 2, 3] 2 = false /\ list_within [1, 2, 3] 3 = true.
+Proof. vm_compute. split; reflexivity. Qed.
