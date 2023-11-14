@@ -1,0 +1,138 @@
+(** Public request/view boundary for ONE serialized owner. No HTTP listener
+    is implemented here. The existing trusted in-process owner API is unchanged.
+    Commands here never carry WIF, slot handles or session snapshots. *)
+Import wallet_psbt.
+Import wallet_keys.
+Import wallet_session.
+Import wallet_key_slot.
+Import wallet_sign_owner.
+Import wallet_review.
+Import tests.keys.
+Import crypto.key_slot.
+Require Import Sandbox Crypto.
+
+Inductive owner_view_stage :=
+| ViewLocked | ViewImported | ViewReview | ViewApproved | ViewSigning | ViewSigned.
+Inductive owner_public_view := OwnerPublicView
+  (revision : N) (stage : owner_view_stage) (imported_id : option public_identity)
+  (transaction_review : option review) (can_approve can_sign can_export : bool).
+
+view_stage (s : session) : owner_view_stage :=
+  match s with
+  | Locked => ViewLocked | KeyImported _ => ViewImported
+  | PsbtLoaded _ _ => ViewReview | Approved _ _ _ => ViewApproved
+  | Signing _ => ViewSigning | Signed _ => ViewSigned end.
+public_owner_view (revision : N) (state : owner_state) : owner_public_view :=
+  match state with OwnerState policy imported_id source exported _ =>
+    OwnerPublicView revision (view_stage policy)
+      (match imported_id with None => None | Some imported => Some (owner_public imported) end)
+      (match source with
+       | None => None
+       | Some (raw, _) => match parse_psbt raw with
+         | Fail _ => None | Done p => Some (review_of p) end end)
+      (match policy, source with PsbtLoaded _ _, Some _ => true | _, _ => false end)
+      (match policy with Approved _ _ _ => true | _ => false end)
+      (match policy, exported with Signed _, Some _ => true | _, _ => false end)
+  end.
+
+Inductive ui_owner_command :=
+| UiInspect
+| UiImportPublicFixture
+| UiLoadPsbt (raw : bytes)
+| UiApproveRevision (displayed_revision : N)
+| UiSignInput (index : N)
+| UiExportPsbt
+| UiLock | UiReset.
+Inductive ui_owner_request := UiOwnerRequest (request_id : N) (command : ui_owner_command).
+Inductive ui_owner_rejection :=
+| UiStaleReview | UiNoReview | UiFixtureDisabled | UiInputIndexOutOfRange.
+Inductive ui_owner_response :=
+| UiOwnerEvent (request_id revision : N) (event : owner_event)
+| UiOwnerView (request_id : N) (view : owner_public_view)
+| UiOwnerRejected (request_id revision : N) (reason : ui_owner_rejection).
+Inductive ui_owner_decision :=
+| UiObserve
+| UiExecute (next_revision : N) (command : owner_command)
+| UiRefuse (reason : ui_owner_rejection).
+
+(** Every accepted mutation advances a binary revision, including identical
+    or failed loads, import, lock/reset, approval and signing. It never resets
+    or narrows to a fixed-width ABI. A revision is public freshness data, not
+    authentication. Only a currently loaded, unapproved review can approve. *)
+decode_ui_owner_command (fixture_enabled : bool) (revision : N) (state : owner_state)
+    (command : ui_owner_command) : ui_owner_decision :=
+  let following := N.succ revision in
+  match command with
+  | UiInspect => UiObserve
+  | UiImportPublicFixture => if fixture_enabled then
+      UiExecute following (OwnerImport (string_of_bytes wif_testnet))
+      else UiRefuse UiFixtureDisabled
+  | UiLoadPsbt raw => UiExecute following (OwnerLoad raw)
+  | UiApproveRevision displayed =>
+      if negb (N.eqb displayed revision) then UiRefuse UiStaleReview else
+      match state with OwnerState policy _ source _ _ =>
+        match policy, source with
+        | PsbtLoaded _ _, Some _ => UiExecute following OwnerApprove
+        | _, _ => UiRefuse UiNoReview end end
+  | UiSignInput index =>
+      if (index <=? 63)%N then UiExecute following (OwnerSign (N.to_nat index))
+      else UiRefuse UiInputIndexOutOfRange
+  | UiExportPsbt => UiExecute revision OwnerExport
+  | UiLock => UiExecute following OwnerLock
+  | UiReset => UiExecute following OwnerReset
+  end.
+
+(** Context rejections and inspect also clear dirty transient state. A fatal
+    cleanup error erases the slot and returns an empty owner, never a success. *)
+ui_owner_clean (state : owner_state) (request_id revision : N)
+    (emit : ui_owner_response -> io unit) : io owner_state :=
+  match slot_status (slot_clear_transient 0) with
+  | SlotOk _ => ret state
+  | SlotError e =>
+    cleared <- owner_erase (fun event => emit (UiOwnerEvent request_id revision event)) ;;
+    emit (UiOwnerEvent request_id revision (OwnerRejected (OwnerKeyError e))) ;;
+    ret cleared
+  end.
+
+(** Internal loop state is never sent to transport callbacks. The request id
+    is retained across both pending and completed signing events. Stable views
+    are emitted on a later iterate step, AFTER the resulting state is installed.
+    No new request is read between pending work and its completion/view. *)
+Inductive ui_owner_loop (Input : Type) := UiOwnerLoop
+  (state : owner_state) (cursor : Input) (revision request_id : N) (publish : bool).
+Arguments UiOwnerLoop {Input} state cursor revision request_id publish.
+
+run_owner_context {Input : Type} (fixture_enabled : bool)
+    (next : Input -> owner_public_view -> io (ui_owner_request * Input))
+    (input : Input) (emit : ui_owner_response -> io unit) : io unit :=
+  initial <- owner_erase (fun event => emit (UiOwnerEvent 0%N 0%N event)) ;;
+  iterate (fun current =>
+    match current with UiOwnerLoop state cursor revision request_id publish =>
+      match state with OwnerState policy imported_id source _ work =>
+      match work with
+      | Some pending =>
+        finished <- owner_finish policy imported_id source pending
+          (fun event => emit (UiOwnerEvent request_id revision event)) ;;
+        ret (UiOwnerLoop finished cursor revision request_id true)
+      | None =>
+        if publish then
+          emit (UiOwnerView request_id (public_owner_view revision state)) ;;
+          ret (UiOwnerLoop state cursor revision request_id false)
+        else
+          incoming <- next cursor (public_owner_view revision state) ;;
+          match incoming with (UiOwnerRequest tag command, following) =>
+          match decode_ui_owner_command fixture_enabled revision state command with
+          | UiExecute next_revision owned_command =>
+            changed <- owner_command_step state owned_command
+              (fun event => emit (UiOwnerEvent tag next_revision event)) ;;
+            ret (UiOwnerLoop changed following next_revision tag true)
+          | UiObserve =>
+            cleaned <- ui_owner_clean state tag revision emit ;;
+            ret (UiOwnerLoop cleaned following revision tag true)
+          | UiRefuse reason =>
+            cleaned <- ui_owner_clean state tag revision emit ;;
+            emit (UiOwnerRejected tag revision reason) ;;
+            ret (UiOwnerLoop cleaned following revision tag true)
+          end end
+      end end
+    end) (UiOwnerLoop initial input 0%N 0%N true).

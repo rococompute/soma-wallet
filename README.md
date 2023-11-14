@@ -754,6 +754,66 @@ outputs and fee, funding ownership, the BIP 143 digest, and the OpenSSL
 signature with low-S. It also checks that no WIF or scalar hex appears in the
 logs.
 
+## Owner request context and review revisions (transport prerequisite)
+
+`wallet_owner_context.soma` adds `run_owner_context fixture_enabled next input emit`
+for the UI's future command transport. It uses the merged owner's command and
+pending-work functions, with **one** serialized owner state. It leaves
+`run_sign_owner` and all existing APIs/tests unchanged. Do not run these two
+entry points concurrently or access the key slot outside the selected owner.
+
+The command source receives its own cursor and an `owner_public_view`: a binary
+revision, public stage/identity, the existing complete transaction review, and
+approve/sign/export availability. It never receives a session, permission,
+slot identity/handle, key, or private owner snapshot. `UiOwnerRequest` attaches
+a public request ID to each command. That ID is retained for pending, completion,
+rejection and final view events, including the two signing iterations.
+`UiOwnerView` is emitted on the iteration **after** the resulting state has been
+installed. Pending signing finishes before a stable view or another request;
+the loop retains no old Approved snapshot. A transport should render/respond
+from this stable view, rather than infer state from an intermediate event.
+
+`UiApproveRevision` must name the exact revision shown with the current loaded
+review. The gate checks equality and requires the state to still be unapproved
+`PsbtLoaded`. Every accepted mutation advances the binary revision, including
+same-byte reloads, malformed loads, key replacement, lock/reset, approval and
+sign attempts. Inspection/export do not advance it. Rejected stale approvals
+also do not advance it. Revisions never reset on lock or narrow to a numeric
+ABI; the old form cannot approve an identical later load or refresh an already
+approved review. `UiSignInput` range-checks its binary index (0..63) before unary
+conversion. Core ownership/signature policy still rejects unsupported or
+not-owned inputs. All context rejections and inspection clear transient WASM
+staging/outputs, and cleanup failure erases the owner rather than reporting
+success. WASM erasure does not erase immutable secret copies held by callers.
+
+This boundary accepts no WIF/scalar command. `UiImportPublicFixture` can import
+only the existing **documented public scalar-one regtest test fixture**, and
+only when the application supplied `fixture_enabled=true` at boot. The default
+future application must pass false unless explicitly opted in; the flag is not
+a request parameter. This is fixture development plumbing, not secure key entry.
+Request IDs and revisions are public correlation/freshness data, not user
+identity, authorization, CSRF protection, or cross-restart freshness tokens.
+A future listener must validate complete, bounded HTTP framing before dispatch,
+and authenticate/serialize genuine user consent. No listener is added here.
+
+New `tests/owner_context.soma/.exp` check decoding, view availability, disabled
+fixture import, stale/missing review, revision increments and huge-index rejection.
+`tests/runtime_owner_context.soma` drives a single live owner by public commands,
+checking its actual views/revisions through approval, identical reload, replay,
+signing, repeated signing, export, replacement, lock/reset and malformed loads.
+It dirties transient staging before each command and checks cleanup before the
+next view/request. The Python test checks exact request correlation/event order,
+fixture-disabled boot mode, log hygiene, and independently verifies the public
+signed PSBT's maps, fee/funding/ownership, BIP143 digest, low-S and OpenSSL signature.
+The fixture images are built by the full pinned `./scripts/check`; to run the
+live fixture check after a build, use `python3 tests/test_owner_context.py`.
+
+This is an explicitly partial UI step. `main.soma` still serves the existing
+locked/read-only JSX page. HTTP framing/dispatch, revision-bearing forms, live
+controls and downloads, fixture opt-in application bootstrap, browser verification,
+secure signer-side key entry, multi-input orchestration, vault/persistence and
+packaging remain unconnected. No unavailable UI action is presented as working.
+
 ## Typed SWVP adapter (KDF gate closed)
 
 `wallet_vault_prod.soma` is the typed boundary over the SWVP exports.

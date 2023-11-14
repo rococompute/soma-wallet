@@ -1,0 +1,2 @@
+Theorem public_context_expectations : context_expectations = List.repeat true 12%nat.
+Proof. vm_compute. reflexivity. Qed.

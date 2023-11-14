@@ -1,0 +1,37 @@
+Import wallet_psbt.
+Import wallet_session.
+Import wallet_keys.
+Import wallet_sign_owner.
+Import wallet_owner_context.
+Require Import Sandbox Crypto.
+
+loaded : owner_state := OwnerState (PsbtLoaded (KeyRef 1) (ParsedPsbtRef 0 "public"))
+  None (Some ([], ParsedPsbtRef 0 "public")) None None.
+context_expectations : list bool := [
+  (match decode_ui_owner_command false 4%N loaded (UiApproveRevision 3%N) with
+| UiRefuse UiStaleReview => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded (UiApproveRevision 4%N) with
+| UiExecute 5%N OwnerApprove => true | _ => false end),
+  (match decode_ui_owner_command false 4%N owner_empty (UiApproveRevision 4%N) with
+| UiRefuse UiNoReview => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded UiImportPublicFixture with
+| UiRefuse UiFixtureDisabled => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded (UiSignInput 4294967296%N) with
+| UiRefuse UiInputIndexOutOfRange => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded (UiSignInput 63%N) with
+| UiExecute 5%N (OwnerSign 63) => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded (UiLoadPsbt []) with
+| UiExecute 5%N (OwnerLoad []) => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded UiLock with
+| UiExecute 5%N OwnerLock => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded UiReset with
+| UiExecute 5%N OwnerReset => true | _ => false end),
+  (match public_owner_view 19%N owner_empty with
+| OwnerPublicView 19%N ViewLocked None None false false false => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded UiInspect with
+| UiObserve => true | _ => false end),
+  (match decode_ui_owner_command false 4%N loaded UiExportPsbt with
+| UiExecute 4%N OwnerExport => true | _ => false end)
+].
+
+main : io unit := ret tt.

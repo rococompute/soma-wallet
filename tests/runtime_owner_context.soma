@@ -1,0 +1,123 @@
+Import wallet_psbt.
+Import wallet_keys.
+Import wallet_session.
+Import wallet_sign_owner.
+Import wallet_owner_context.
+Import wallet_review.
+Import crypto.key_slot.
+Import tests.sign_driver_fixture.
+Require Import Sandbox Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+clean (token : unit) : bool :=
+  andb (N.eqb (slot_inputs_cleared 0) 1)
+    (andb (N.eqb (slot_public_byte 0) 256) (N.eqb (slot_der_size 0) 256)).
+
+(** Cursor is only public transport bookkeeping. Revisions below are checked
+    against the live owner view before selecting each command. *)
+request_at (cursor : nat) : ui_owner_command :=
+  match cursor with
+  | 0%nat => UiImportPublicFixture
+  | 1%nat => UiLoadPsbt fixture_raw
+  | 2%nat => UiApproveRevision 2%N
+  | 3%nat => UiLoadPsbt fixture_raw
+  | 4%nat => UiApproveRevision 2%N
+  | 5%nat => UiSignInput 0%N
+  | 6%nat => UiApproveRevision 5%N
+  | 7%nat => UiApproveRevision 6%N
+  | 8%nat => UiSignInput 0%N
+  | 9%nat => UiSignInput 0%N
+  | 10%nat => UiExportPsbt
+  | 11%nat => UiLoadPsbt fixture_raw
+  | 12%nat => UiExportPsbt
+  | 13%nat => UiApproveRevision 5%N
+  | 14%nat => UiApproveRevision 9%N
+  | 15%nat => UiImportPublicFixture
+  | 16%nat => UiApproveRevision 10%N
+  | 17%nat => UiExportPsbt
+  | 18%nat => UiLoadPsbt fixture_raw
+  | 19%nat => UiApproveRevision 12%N
+  | 20%nat => UiLock
+  | 21%nat => UiApproveRevision 12%N
+  | 22%nat => UiExportPsbt
+  | 23%nat => UiImportPublicFixture
+  | 24%nat => UiLoadPsbt fixture_raw
+  | 25%nat => UiLoadPsbt [999]
+  | 26%nat => UiApproveRevision 16%N
+  | 27%nat => UiReset
+  | 28%nat => UiInspect
+  | 29%nat => UiSignInput 4294967296%N
+  | _ => UiLock end.
+expected_view (cursor : nat) (view : owner_public_view) : bool :=
+  match view with OwnerPublicView revision stage public_id reviewed can_approve can_sign can_export =>
+    let expected_revision := List.nth cursor
+      [0%N,1%N,2%N,3%N,4%N,4%N,5%N,6%N,6%N,7%N,8%N,8%N,9%N,9%N,9%N,
+       10%N,11%N,11%N,11%N,12%N,13%N,14%N,14%N,14%N,15%N,16%N,17%N,17%N,18%N,18%N,18%N] 999%N in
+    andb (N.eqb revision expected_revision)
+      (match cursor with
+       | 0%nat | 21%nat | 22%nat | 23%nat | 28%nat | 29%nat | 30%nat =>
+           match stage, public_id, reviewed, can_approve, can_sign, can_export with
+           | ViewLocked, None, None, false, false, false => true | _, _, _, _, _, _ => false end
+       | 3%nat | 7%nat | 8%nat | 15%nat | 20%nat =>
+           andb can_sign (negb can_approve)
+       | 9%nat | 10%nat | 11%nat => andb can_export (negb can_sign)
+       | 2%nat | 4%nat | 5%nat | 6%nat | 12%nat | 13%nat | 14%nat | 19%nat | 25%nat =>
+           andb can_approve (andb (negb can_sign) (negb can_export))
+       | _ => andb (negb can_approve) (andb (negb can_sign) (negb can_export))
+       end)
+  end.
+next (cursor : nat) (view : owner_public_view) : io (ui_owner_request * nat) :=
+  if negb (andb (expected_view cursor view) (clean tt)) then
+    print (String.append "CONTEXT_BAD_STEP=" (decimal (count (List.repeat 0 cursor)))) ;; exit 90
+  else if Nat.eqb cursor 30%nat then
+    print "PASS: revision-bound live owner context, request correlation, stale/replayed approval, reload/replacement/lock/export invalidation" ;; exit 0
+  else
+    let handle := slot_handle 0 in
+    let dirty := if N.eqb handle 0 then true else
+      if N.eqb (slot_begin_digest handle 32) 1 then N.eqb (slot_digest_byte 0 1) 1 else false in
+    if dirty then ret (UiOwnerRequest (N.of_nat (S cursor)) (request_at cursor), S cursor) else exit 91.
+
+emit (response : ui_owner_response) : io unit :=
+  match response with
+  | UiOwnerView tag (OwnerPublicView revision stage _ reviewed _ _ _) =>
+    if negb (clean tt) then exit 92 else
+    (match reviewed with
+     | Some (Review _ _ [_] [_] _ (Fee _ fee)) => if eqb fee 1000 then ret tt else exit 93
+     | None => ret tt | _ => exit 94 end) ;;
+    print (String.append "VIEW_TAG=" (decimal (count (List.repeat 0 (N.to_nat tag)))))
+  | UiOwnerRejected tag revision reason =>
+    if negb (clean tt) then exit 95 else
+    print (match reason with UiStaleReview => "CONTEXT: stale"
+      | UiNoReview => "CONTEXT: no-review" | UiFixtureDisabled => "CONTEXT: disabled"
+      | UiInputIndexOutOfRange => "CONTEXT: index" end)
+  | UiOwnerEvent tag revision event =>
+    if negb (match event with OwnerPending => N.eqb (slot_inputs_cleared 0) 0 | _ => clean tt end)
+      then exit 96 else
+    match event with
+    | OwnerPending => if andb (N.eqb tag 9%N) (N.eqb revision 7%N) then print "CONTEXT: pending" else exit 97
+    | OwnerSigned => if andb (N.eqb tag 9%N) (N.eqb revision 7%N) then print "CONTEXT: signed" else exit 98
+    | OwnerExported raw text =>
+      print (String.append "SIGNED_PSBT_HEX=" (hex_of_bytes raw)) ;;
+      print (String.append "SIGNED_PSBT_BASE64=" text)
+    | OwnerRejected (OwnerSessionError NotApproved) => print "CONTEXT: not-approved"
+    | OwnerRejected (OwnerSessionError AlreadySigned) => print "CONTEXT: already-signed"
+    | OwnerRejected OwnerNoExport => print "CONTEXT: no-export"
+    | OwnerRejected (OwnerParserError _) => print "CONTEXT: parser-error"
+    | OwnerRejected _ => exit 99
+    | OwnerLocked => if N.eqb (slot_locked 0) 1 then ret tt else exit 100
+    | _ => ret tt end
+  end.
+disabled_next (cursor : nat) (view : owner_public_view) : io (ui_owner_request * nat) :=
+  match view with
+  | OwnerPublicView 0%N ViewLocked None None false false false =>
+    if negb (andb (clean tt) (N.eqb (slot_locked 0) 1)) then exit 101 else
+    match cursor with
+    | O => ret (UiOwnerRequest 1%N UiImportPublicFixture, 1%nat)
+    | _ => print "PASS: fixture import disabled without boot opt-in" ;; exit 0 end
+  | _ => exit 102 end.
+main : io unit := selectors <- args ;;
+  match selectors with
+  | ["public-one"] => run_owner_context true next 0%nat emit
+  | ["fixture-disabled"] => run_owner_context false disabled_next 0%nat emit
+  | _ => exit 1 end.
