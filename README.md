@@ -24,8 +24,12 @@ as the operator and is not a security sandbox.
 
 A personal-use, offline Bitcoin signing wallet UI, defined with Soma's existing
 Reason-style JSX and served by a MirageOS unikernel. Private keys belong in the
-offline signing unikernel. This development baseline does not yet import keys,
-parse PSBTs, or expose signing endpoints; its sign button is disabled.
+offline signing unikernel. In this development baseline the served UI parses
+and reviews a pasted PSBT (`POST /review`), but the served UI does not import keys
+or expose approve, sign, export or unlock endpoints; those buttons are disabled.
+Key import, approval, signing and signed-PSBT export exist only inside booted
+signer test images with public fixture keys (see the owner and key-slot sections
+below).
 
 The existing Soma runtime has been exercised without source changes: a host-only
 unikernel served a JSX page, and a separate unikernel derived a known compressed
@@ -448,6 +452,18 @@ arriving whole, and whitespace inside the Base64 rejected.
 Requires the existing local Soma checkout/toolchain, opam switch `hvf` with the
 Solo5/Mirage tools, Python 3, Node.js, and `timeout`. Rebuilding the app-local
 cryptography module needs Zig; checks rebuild it from the vendored source. No Soma source changes are in scope.
+
+Packaging status: `./scripts/run` runs `./scripts/check`, then boots the actual
+UI image (`main.hvt`) under `solo5-vmnet --mode=host --isolate`, serving on port
+8080 of an isolated host-only network. `tests/test_ui_http.py` boots it the same
+way and checks it over HTTP. `tests/test_packaging.py` checks that the dependency
+pins here match `vendor/*/UPSTREAM` (tag, commit and file hashes), that every
+repository path this README names exists, that the documented commands exist and
+are executable, and that the scope and development-only statements stay present.
+Live in the served UI: the locked page and PSBT review. Unavailable there: key
+import or unlock, approval, signing, export, the vault and any persistence.
+There is no recovery: nothing is persisted, so lock/reset or a restart loses all
+state, and only public development keys are used.
 
 ```sh
 ./scripts/check               # serialized builds and an actual signing-image boot
