@@ -1,0 +1,70 @@
+Import wallet_psbt wallet_keys wallet_session wallet_key_runtime wallet_key_slot crypto.key_slot.
+Import wallet_signing_prepare.
+Import wallet_sign_owner tests.keys tests.sign_driver_fixture.
+Require Import Sandbox Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** PUBLIC scalar-one/two fixtures. No session or key handle enters a command. *)
+scalar_two_wif : string := "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87K7XCyj5v".
+other_raw : bytes := firstn (Nat.sub (List.length fixture_raw) 2) fixture_raw ++ [222,0].
+next (commands : list owner_command) : io (owner_command * list owner_command) :=
+  match commands with [] => ret (OwnerStop, []) | c :: rest => ret (c, rest) end.
+clean (token : unit) : bool := andb (N.eqb (slot_inputs_cleared 0) 1)
+  (andb (N.eqb (slot_public_byte 0) 256) (N.eqb (slot_der_size 0) 256)).
+output (event : owner_event) : io unit :=
+  (** Every event except Pending follows cleanup. Pending precedes slot IO. *)
+  if negb (match event with
+    | OwnerPending => N.eqb (slot_inputs_cleared 0) 0
+    | _ => clean tt end) then exit 90 else
+  match event with
+  | OwnerImported _ => print "OWNER: imported"
+  | OwnerReviewed _ => print "OWNER: reviewed"
+  | OwnerApproved =>
+    if negb (N.eqb (slot_begin_digest (slot_handle 0) 32) 1) then exit 93 else
+    if negb (N.eqb (slot_digest_byte 0 1) 1) then exit 94 else
+    print "OWNER: approved"
+  | OwnerPending => print "OWNER: pending"
+  | OwnerSigned => print "OWNER: signed"
+  | OwnerLocked => if N.eqb (slot_locked 0) 1 then print "OWNER: locked" else exit 91
+  | OwnerStopped => print "PASS: live serialized signer owner commands and cleanup"
+  | OwnerExported raw text =>
+    print (String.append "SIGNED_PSBT_HEX=" (hex_of_bytes raw)) ;;
+    print (String.append "SIGNED_PSBT_BASE64=" text)
+  | OwnerRejected error => match error with
+    | OwnerSessionError NotApproved => print "OWNER: not-approved"
+    | OwnerSessionError ApprovalConsumed => print "OWNER: consumed"
+    | OwnerSessionError AlreadySigned => print "OWNER: already-signed"
+    | OwnerSessionError NoKey => print "OWNER: no-key"
+    | OwnerSessionError NoPsbt => print "OWNER: no-psbt"
+    | OwnerPreparationError InputNotOwned => print "OWNER: not-owned"
+    | OwnerPreparationError _ => print "OWNER: preparation-error"
+    | OwnerKeyError _ => print "OWNER: key-error"
+    | OwnerParserError _ => print "OWNER: parser-error"
+    | OwnerNoExport => print "OWNER: no-export"
+    | _ => exit 92 end
+  end.
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | ["public-one"] =>
+    run_sign_owner next [
+      OwnerSign 0%nat, OwnerExport,
+      OwnerImport (string_of_bytes wif_testnet), OwnerSign 0%nat,
+      OwnerLoad fixture_raw, OwnerSign 0%nat,
+      OwnerApprove, OwnerLoad fixture_raw, OwnerSign 0%nat,
+      OwnerApprove, OwnerSign 1%nat, OwnerSign 0%nat, OwnerApprove, OwnerExport,
+      OwnerLoad fixture_raw, OwnerApprove, OwnerSign 0%nat, OwnerSign 0%nat,
+      OwnerExport,
+      OwnerLoad other_raw, OwnerExport, OwnerSign 0%nat,
+      OwnerApprove, OwnerLoad [], OwnerSign 0%nat, OwnerExport,
+      OwnerLoad fixture_raw, OwnerApprove, OwnerLock, OwnerSign 0%nat, OwnerExport,
+      OwnerImport scalar_two_wif, OwnerLoad fixture_raw, OwnerApprove,
+      OwnerSign 0%nat, OwnerSign 0%nat, OwnerExport,
+      OwnerLoad fixture_raw, OwnerApprove,
+      OwnerImport (string_of_bytes wif_testnet), OwnerSign 0%nat, OwnerExport,
+      OwnerLoad fixture_raw, OwnerApprove, OwnerImport "invalid", OwnerSign 0%nat, OwnerExport,
+      OwnerImport (string_of_bytes wif_testnet), OwnerLoad fixture_raw,
+      OwnerApprove, OwnerReset, OwnerSign 0%nat, OwnerExport
+    ] output
+  | _ => exit 1 end.

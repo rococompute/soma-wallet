@@ -645,6 +645,53 @@ mainnet/malformed WIFs, and oversized-handle rejection before ABI narrowing.
 Captured boot logs are checked for WIF/private scalar hex. The new tests run with
 the unchanged legacy tests in `./scripts/check`. Nothing is broadcast or persisted.
 
+## Serialized signer owner (command loop; UI still disabled)
+
+`wallet_sign_owner.soma` adds `run_sign_owner`, a single application entry point
+using the installed `Sandbox.iterate` state loop; it needs no mutable cell.
+The command source receives
+only its own input cursor. Commands import a signer-side regtest WIF, load public
+PSBT bytes, approve the current review, request signing by input index, export,
+lock/reset or stop. Neither commands nor emitted events accept or reveal a
+session snapshot, key handle or permission. The event sink receives public
+identity/review data, typed failures and public signed exports. Start exactly
+one owner for the key-slot WASM instance and route all operations through it;
+other wallet code must not call the slot directly or start concurrent owners.
+This is application ownership within that entry point, not isolation against
+malicious wallet code with access to the lower-level primitives.
+
+For a sign command the owner consumes approval and returns a pending `Signing`
+state to `iterate`. It retains only that permission and a prepared public digest,
+not the old `Approved` value. The next loop step completes this work before
+polling another command. Only that step calls `sign_slot`, verifies the slot's
+public identity, inserts DER and installs the source-bound `Signed` result.
+There is no caller-supplied pending-store callback. Preparation and signing
+failures install the consumed state and clear staging/outputs. Import failures,
+lock/reset and stop erase the slot and drop identity, review and export
+references. Every load, including the same bytes or a malformed PSBT, invalidates
+approval and old exports. A new load after signing begins a new review using
+the retained identity; it needs another explicit approval command. The owner
+cannot accept a mismatched caller key reference or sign caller-substituted PSBT
+bytes: those are not sign-command parameters.
+
+`tests/runtime_sign_owner.soma` boots a command stream against the live loop.
+It imports public scalar one once before the successful signature, then tests
+reload/consumption/repetition, invalid input index, a different PSBT, malformed
+loads, scalar-two ownership failure, replacement failures, lock/reset and
+export invalidation. The observer dirties staging after approval; the pending
+event must precede slot cleanup/signing, and all other events require clean
+staging/outputs. `tests/test_runtime_sign_owner.py` checks the exact public event
+sequence and independently checks the exported maps, funding ownership, outputs,
+1000-satoshi fee, BIP143 digest and low-S OpenSSL signature. Logs are checked for
+both public fixture WIFs and scalar hex. Existing tests are unchanged.
+
+The source and observer are trusted application callbacks; future transport
+code must serialize genuine user review/approval events into this entry point.
+There is no HTTP/UI command transport or secure signer-side key-entry flow yet,
+and the served UI remains locked. WASM wiping does not erase immutable WIF
+strings held by callers or runtime copies. Production vault unlock, persistence,
+entropy checks and multi-input orchestration remain separate work.
+
 ## Handle-only approved PSBT signing (composition; not an authoritative owner)
 
 `wallet_slot_sign_runtime.soma` signs an approved PSBT with the retained key

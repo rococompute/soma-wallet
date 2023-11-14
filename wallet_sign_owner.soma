@@ -1,0 +1,179 @@
+(** One serialized signer entry point over Sandbox.iterate. Commands contain
+    neither session snapshots nor key handles. The loop retains its own state;
+    observers receive public events only. Run exactly one owner per WASM slot. *)
+Import wallet_psbt wallet_keys wallet_session wallet_signing_prepare.
+Import wallet_partial_export wallet_key_runtime wallet_key_slot crypto.key_slot.
+Require Import Sandbox Crypto.
+
+Inductive owner_command :=
+| OwnerImport (wif : string)
+| OwnerLoad (raw : bytes)
+| OwnerApprove
+| OwnerSign (index : nat)
+| OwnerExport
+| OwnerLock
+| OwnerReset
+| OwnerStop.
+Inductive owner_error :=
+| OwnerSessionError (error : session_error)
+| OwnerParserError (error : parse_error)
+| OwnerKeyError (error : slot_error)
+| OwnerPreparationError (error : signing_prepare_error)
+| OwnerExportError (error : partial_export_error)
+| OwnerNoExport
+| OwnerBindingError.
+Inductive owner_event :=
+| OwnerImported (public_id : public_identity)
+| OwnerReviewed (transaction : psbt)
+| OwnerApproved
+| OwnerPending
+| OwnerSigned
+| OwnerExported (raw : bytes) (base64_text : string)
+| OwnerLocked
+| OwnerRejected (error : owner_error)
+| OwnerStopped.
+
+(** Implementation state: never passed to a command source or observer.
+    Work is installed by returning it to iterate, before ANY signing slot IO.
+    No Approved snapshot survives into the pending phase. *)
+Inductive owner_work :=
+| OwnerDigest (index : nat) (digest : bytes)
+| OwnerFailure (error : owner_error).
+Inductive owner_state := OwnerState
+  (policy : session) (identity : option slot_identity)
+  (source : option (bytes * psbt_ref))
+  (exported : option (bytes * string)) (work : option owner_work).
+owner_empty : owner_state := OwnerState Locked None None None None.
+owner_key_ref (id : slot_identity) : key_ref :=
+  match id with SlotIdentity (KeySlotHandle g) _ => KeyRef (N.to_nat g) end.
+owner_public (id : slot_identity) : public_identity :=
+  match id with SlotIdentity _ pub => pub end.
+owner_bound (policy : session) (id : slot_identity) : bool :=
+  match active_key policy, owner_key_ref id with
+  | Some (KeyRef a), KeyRef b => Nat.eqb a b
+  | _, _ => false end.
+
+owner_clear (state : owner_state) (event : owner_event)
+    (emit : owner_event -> io unit) : io owner_state :=
+  match slot_status (slot_clear_transient 0) with
+  | SlotError e =>
+    match lock_key_slot tt with
+    | SlotError fatal => emit (OwnerRejected (OwnerKeyError fatal)) ;; ret owner_empty
+    | SlotOk _ => emit (OwnerRejected (OwnerKeyError e)) ;; ret owner_empty end
+  | SlotOk _ => emit event ;; ret state end.
+owner_erase (emit : owner_event -> io unit) : io owner_state :=
+  match lock_key_slot tt with
+  | SlotError e => emit (OwnerRejected (OwnerKeyError e)) ;; ret owner_empty
+  | SlotOk _ => emit OwnerLocked ;; ret owner_empty end.
+
+(** This continuation is run only by the NEXT iterate step. At this point
+    the loop has installed Signing and has discarded approval and old export. *)
+owner_finish (policy : session) (id : option slot_identity)
+    (source : option (bytes * psbt_ref)) (work : owner_work)
+    (emit : owner_event -> io unit) : io owner_state :=
+  let failed := OwnerState policy id source None None in
+  match work, id, source with
+  | OwnerFailure e, _, _ => owner_clear failed (OwnerRejected e) emit
+  | OwnerDigest index digest, Some imported, Some (raw, reference) =>
+    if negb (owner_bound policy imported) then owner_clear failed (OwnerRejected OwnerBindingError) emit else
+    match policy with
+    | Signing (SignPermission _ bound) =>
+      if negb (same_psbt bound reference) then owner_clear failed (OwnerRejected OwnerBindingError) emit else
+      match sign_slot imported digest with
+      | SlotError e => owner_clear failed (OwnerRejected (OwnerKeyError e)) emit
+      | SlotOk (SlotSignature _ der) =>
+        match insert_partial_candidate raw (owner_public imported) index der with
+        | CandidateRejected e => owner_clear failed (OwnerRejected (OwnerExportError e)) emit
+        | Candidate (PartialCandidate serialized text) =>
+          match complete_sign policy (SignedPsbtRef 0 reference) with
+          | Err e => owner_clear failed (OwnerRejected (OwnerSessionError e)) emit
+          | Ok signed => owner_clear
+              (OwnerState signed id source (Some (serialized, text)) None) OwnerSigned emit
+          end
+        end
+      end
+    | _ => owner_clear failed (OwnerRejected OwnerBindingError) emit end
+  | _, _, _ => owner_clear failed (OwnerRejected OwnerBindingError) emit end.
+
+owner_command_step (state : owner_state) (command : owner_command)
+    (emit : owner_event -> io unit) : io owner_state :=
+  match state with OwnerState policy id source exported _ =>
+  match command with
+  | OwnerImport wif =>
+    (** Import invalidates all references even on malformed replacement. *)
+    match import_slot_wif Regtest wif with
+    | SlotError e => emit (OwnerRejected (OwnerKeyError e)) ;; ret owner_empty
+    | SlotOk imported => emit (OwnerImported (owner_public imported)) ;;
+      ret (OwnerState (KeyImported (owner_key_ref imported)) (Some imported) None None None)
+    end
+  | OwnerLoad raw =>
+    (** Every load discards approval/export, including failed and same-byte loads.
+        A Signed session can start a new review using the retained identity. *)
+    match id with
+    | None => owner_clear owner_empty (OwnerRejected (OwnerSessionError NoKey)) emit
+    | Some imported =>
+      let base := KeyImported (owner_key_ref imported) in
+      let unloaded := OwnerState base id None None None in
+      match parse_psbt raw with
+      | Fail e => owner_clear unloaded (OwnerRejected (OwnerParserError e)) emit
+      | Done transaction => match reference_for 0%nat raw with
+        | Fail e => owner_clear unloaded (OwnerRejected (OwnerParserError e)) emit
+        | Done reference => match load_psbt base reference with
+          | Err e => owner_clear unloaded (OwnerRejected (OwnerSessionError e)) emit
+          | Ok loaded => owner_clear (OwnerState loaded id (Some (raw, reference)) None None)
+              (OwnerReviewed transaction) emit end
+        end
+      end
+    end
+  | OwnerApprove =>
+    match source with
+    | None => owner_clear state (OwnerRejected (OwnerSessionError NoPsbt)) emit
+    | Some (_, reference) => match approve policy reference with
+      | Err e => owner_clear state (OwnerRejected (OwnerSessionError e)) emit
+      | Ok approved => owner_clear (OwnerState approved id source None None) OwnerApproved emit end
+    end
+  | OwnerSign index =>
+    match sign_request policy with
+    | Err e => owner_clear state (OwnerRejected (OwnerSessionError e)) emit
+    | Ok pending =>
+      let work := match id, source with
+        | Some imported, Some (raw, _) =>
+          if negb (owner_bound pending imported) then OwnerFailure OwnerBindingError else
+          match prepare_signing policy raw (owner_public imported) index with
+          | PreparationFailed e => OwnerFailure (OwnerPreparationError e)
+          | Prepared (SigningPreparation _ _ _ _ digest) => OwnerDigest index digest end
+        | _, _ => OwnerFailure OwnerBindingError end in
+      emit OwnerPending ;;
+      ret (OwnerState pending id source None (Some work))
+    end
+  | OwnerExport =>
+    match policy, exported with
+    | Signed _, Some (raw, text) => owner_clear state (OwnerExported raw text) emit
+    | _, _ => owner_clear state (OwnerRejected OwnerNoExport) emit end
+  | OwnerLock | OwnerReset => owner_erase emit
+  | OwnerStop =>
+    ignored <- owner_erase emit ;; emit OwnerStopped ;; exit 0
+  end end.
+
+(** The input cursor is independent of signer state; it can be a fixture list
+    or a future serialized command transport. Pending work runs BEFORE polling
+    another command, so callbacks never receive a state or permission ticket.
+    Call once at the application entry point. No concurrent direct slot users. *)
+run_sign_owner {Input : Type}
+    (next : Input -> io (owner_command * Input)) (input : Input)
+    (emit : owner_event -> io unit) : io unit :=
+  initial <- owner_erase emit ;;
+  iterate (fun current =>
+    match current with (state, cursor) =>
+      match state with OwnerState policy id source _ work =>
+      match work with
+      | Some pending =>
+        finished <- owner_finish policy id source pending emit ;;
+        ret (finished, cursor)
+      | None =>
+        incoming <- next cursor ;;
+        match incoming with (command, following) =>
+          changed <- owner_command_step state command emit ;;
+          ret (changed, following)
+        end
+      end end end) (initial, input).
