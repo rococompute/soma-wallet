@@ -1,0 +1,13 @@
+(** Signer-only experimental vault. Status 1 ok, 2 length, 3 not begun,
+    4 byte, 5 index/slot, 6 incomplete, 7 header, 8 auth, 9 entropy unavailable.
+    Readers return octets or 256 no output / 257 index. *)
+vault_lock : N -> N.
+vault_begin : N -> N.
+vault_put : N -> N -> N -> N.
+vault_test_seal : N -> N.
+vault_seal : N -> N.
+vault_open : N -> N.
+vault_envelope_byte : N -> N.
+vault_opened_byte : N -> N.
+vault_inputs_cleared : N -> N.
+vault_locked : N -> N.

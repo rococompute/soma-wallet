@@ -1,0 +1,36 @@
+Require Import Sandbox.
+Import wallet_vault crypto.vault.
+
+empty_bridge (token : unit) : bool :=
+  andb (N.eqb (vault_inputs_cleared 0) 1)
+    (andb (N.eqb (vault_envelope_byte 0) 256) (N.eqb (vault_opened_byte 0) 256)).
+
+check_public_fixture (selector : string) : bool :=
+  let pass := if String.eqb selector "public-fixture" then [112%N,117%N,98%N] else [] in
+  let key := List.repeat 0%N 31 ++ [1%N] in
+  match test_seal pass key (List.repeat 17%N 16) (List.repeat 34%N 24) with
+  | VaultError _ => false
+  | VaultOk sealed => if empty_bridge tt then
+    match open_envelope pass sealed with
+    | VaultError _ => false
+    | VaultOk (OpenedKey actual) =>
+      if andb (forallb (fun pair => N.eqb (fst pair) (snd pair)) (combine key actual))
+        (andb (Nat.eqb (List.length actual) 32) (empty_bridge tt)) then
+      match open_envelope [119%N,114%N,111%N,110%N,103%N] sealed with
+      | VaultError VaultAuthentication => if empty_bridge tt then
+        match seal_unavailable tt with
+        | VaultError VaultEntropyUnavailable => empty_bridge tt
+        | _ => false end
+        else false
+      | _ => false end
+      else false
+    end else false
+  end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | [selector] => if check_public_fixture selector then
+      print "PASS: typed vault public roundtrip, wrong passphrase and cleanup"
+    else exit 1
+  | _ => exit 1 end.

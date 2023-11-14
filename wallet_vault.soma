@@ -1,0 +1,128 @@
+(** Experimental signer-local envelope adapter, not a persistence/key store.
+    Every operation must run serially at runtime. No browser or log interface.
+    TEST sealing requires caller-supplied public salt/nonce: never real keys.
+    Production sealing fails closed until signer entropy is integrated. *)
+Import crypto.vault.
+
+Inductive vault_error := VaultLength | VaultNotBegun | VaultByte | VaultIndex
+  | VaultIncomplete | VaultHeader | VaultAuthentication | VaultEntropyUnavailable
+  | VaultNoOutput | VaultUnknown (code : N).
+Inductive vault_result (A : Type) := VaultOk (value : A) | VaultError (error : vault_error).
+Arguments VaultOk {A} value.
+Arguments VaultError {A} error.
+Inductive sealed_envelope := SealedEnvelope (public_bytes : list N).
+(** Only the explicit open path returns this secret, inside the signer.
+    Never serialize/log it. Lock clears WASM, not immutable runtime copies. *)
+Inductive opened_key := OpenedKey (private_bytes : list N).
+
+vault_error_of (code : N) : vault_error :=
+  if N.eqb code 2 then VaultLength else
+  if N.eqb code 3 then VaultNotBegun else
+  if N.eqb code 4 then VaultByte else
+  if N.eqb code 5 then VaultIndex else
+  if N.eqb code 6 then VaultIncomplete else
+  if N.eqb code 7 then VaultHeader else
+  if N.eqb code 8 then VaultAuthentication else
+  if N.eqb code 9 then VaultEntropyUnavailable else VaultUnknown code.
+vault_status (code : N) : vault_result unit :=
+  if N.eqb code 1 then VaultOk tt else VaultError (vault_error_of code).
+
+Fixpoint vault_bounded (remaining : nat) (raw : list N) : bool :=
+  match raw, remaining with
+  | [], _ => true | _ :: _, O => false
+  | b :: rest, S n => andb (b <? 256)%N (vault_bounded n rest)
+  end.
+Fixpoint vault_stage (slot index : N) (raw : list N) : vault_result unit :=
+  match raw with
+  | [] => VaultOk tt
+  | b :: rest => match vault_status (vault_put slot index b) with
+    | VaultError e => VaultError e
+    | VaultOk _ => vault_stage slot (index + 1)%N rest
+    end
+  end.
+Fixpoint vault_read (reader : N -> N) (remaining : nat) (index : N) : vault_result (list N) :=
+  match remaining with
+  | O => VaultOk []
+  | S n => let b := reader index in
+    if (b <? 256)%N then
+      match vault_read reader n (index + 1)%N with
+      | VaultError e => VaultError e | VaultOk rest => VaultOk (b :: rest) end
+    else VaultError (if N.eqb b 256 then VaultNoOutput else VaultIndex)
+  end.
+
+finish_vault {A : Type} (result : vault_result A) : vault_result A :=
+  match result with
+  | VaultOk value => match vault_status (vault_lock 0) with
+    | VaultOk _ => VaultOk value | VaultError e => VaultError e end
+  | VaultError error => match vault_status (vault_lock 0) with
+    | VaultOk _ => VaultError error | VaultError e => VaultError e end
+  end.
+
+(** Version 1 test envelope: SWVT, Argon2id v19 (64 KiB/3/1 TEST COST ONLY),
+    XChaCha20-Poly1305, fixed authenticated header52 + ciphertext32 + tag16.
+    Persistence and production sealing are deliberately unavailable. *)
+test_seal_staged (pass key salt nonce : list N) : vault_result sealed_envelope :=
+  match vault_status (vault_begin (N.of_nat (List.length pass))) with
+  | VaultError e => VaultError e
+  | VaultOk _ => match vault_stage 0 0 pass with
+    | VaultError e => VaultError e
+    | VaultOk _ => match vault_stage 1 0 key with
+      | VaultError e => VaultError e
+      | VaultOk _ => match vault_stage 2 12 salt with
+        | VaultError e => VaultError e
+        | VaultOk _ => match vault_stage 2 28 nonce with
+          | VaultError e => VaultError e
+          | VaultOk _ => match vault_status (vault_test_seal 0) with
+            | VaultError e => VaultError e
+            | VaultOk _ => match vault_read vault_envelope_byte 100 0 with
+              | VaultError e => VaultError e | VaultOk raw => VaultOk (SealedEnvelope raw) end
+            end
+          end
+        end
+      end
+    end
+  end.
+
+test_seal (pass key salt nonce : list N) : vault_result sealed_envelope :=
+  match vault_status (vault_lock 0) with
+  | VaultError e => VaultError e
+  | VaultOk _ => finish_vault (
+    if negb (andb (vault_bounded 128 pass)
+      (andb (vault_bounded 32 key) (andb (vault_bounded 16 salt) (vault_bounded 24 nonce))))
+    then VaultError VaultByte else
+    if negb (andb (Nat.eqb (List.length key) 32)
+      (andb (Nat.eqb (List.length salt) 16) (Nat.eqb (List.length nonce) 24)))
+    then VaultError VaultLength else test_seal_staged pass key salt nonce)
+  end.
+
+open_staged (pass raw : list N) : vault_result opened_key :=
+  match vault_status (vault_begin (N.of_nat (List.length pass))) with
+  | VaultError e => VaultError e
+  | VaultOk _ => match vault_stage 0 0 pass with
+    | VaultError e => VaultError e
+    | VaultOk _ => match vault_stage 2 0 raw with
+      | VaultError e => VaultError e
+      | VaultOk _ => match vault_status (vault_open 100) with
+        | VaultError e => VaultError e
+        | VaultOk _ => match vault_read vault_opened_byte 32 0 with
+          | VaultError e => VaultError e | VaultOk key => VaultOk (OpenedKey key) end
+        end
+      end
+    end
+  end.
+
+open_envelope (pass : list N) (sealed : sealed_envelope) : vault_result opened_key :=
+  match vault_status (vault_lock 0) with
+  | VaultError e => VaultError e
+  | VaultOk _ => finish_vault (match sealed with SealedEnvelope raw =>
+    if negb (andb (vault_bounded 128 pass) (vault_bounded 100 raw))
+    then VaultError VaultByte else
+    if negb (Nat.eqb (List.length raw) 100) then VaultError VaultLength
+    else open_staged pass raw end)
+  end.
+
+seal_unavailable (token : unit) : vault_result sealed_envelope :=
+  match vault_status (vault_seal 0) with
+  | VaultError e => VaultError e
+  | VaultOk _ => VaultError VaultEntropyUnavailable end.
+lock_vault (token : unit) : vault_result unit := vault_status (vault_lock 0).

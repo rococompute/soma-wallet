@@ -33,6 +33,80 @@ public key, signed and verified a digest with Bitcoin Core libsecp256k1, rejecte
 a modified signature, and rejected a zero private key. The proof-of-capability
 code is in `crypto/`; it uses the public scalar-one test key, not a wallet key.
 
+## Experimental vault primitive (test-only; persistence disabled)
+
+`crypto/vault.c` and `wallet_vault.soma` add an isolated signer-local foundation,
+using unchanged Monocypher 4.0.3 sources for Argon2id v19 and
+XChaCha20-Poly1305. Upstream is https://github.com/LoupVaillant/Monocypher,
+commit `ab2b16dd619ad5f6979a4fbe69cfa324a6fcc35f`; source/license SHA256 hashes
+and license choices are recorded in `vendor/monocypher/UPSTREAM`. The existing
+Zig build compiles this separate WASM module with no host imports. No cryptographic
+primitive is implemented in the wallet wrapper.
+
+Only `test_seal` / `vault_test_seal` seal data, using caller-supplied PUBLIC fixture
+salt/nonce. **Never call these with real keys or passwords.** The fixed test KDF
+cost is deliberately weak: 64 KiB, 3 passes, 1 lane, 32 output bytes. It permits a
+booted test under the existing WASM interpreter, not password protection. The
+initial 8192-KiB runtime fixture exceeded its boot budget. Production sealing
+(`vault_seal`, `seal_unavailable`) always clears state and rejects with
+`VaultEntropyUnavailable`. A real vault needs a distinct production format and
+hardware-calibrated KDF policy; this test envelope must never silently become one.
+
+The exact 100-byte **test** envelope is:
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 4 | ASCII `SWVT` (Soma Wallet Vault Test) |
+| 4 | 1 | Version 1 |
+| 5 | 1 | KDF 1 = Argon2id v19 |
+| 6 | 1 | AEAD 1 = XChaCha20-Poly1305 |
+| 7 | 1 | Lanes = 1 |
+| 8 | 2 | Memory KiB, little endian = 64 |
+| 10 | 1 | Passes = 3 |
+| 11 | 1 | Reserved = 0 |
+| 12 | 16 | Public test salt |
+| 28 | 24 | Public test nonce |
+| 52 | 32 | Ciphertext for one 32-byte test key |
+| 84 | 16 | Authentication tag |
+
+All 52 header bytes are AEAD associated data. Open requires the exact size and
+fixed header/parameters before invoking the KDF, preventing attacker-selected
+resource use or downgrade. Wrong passphrase and altered salt/nonce/ciphertext/tag
+produce the same authentication error, with no plaintext. Unsupported headers,
+versions and truncated/oversized envelopes fail with typed errors.
+
+Entropy remains a blocker for real-key sealing. The existing `Sandbox.random`
+calls `Mirage_crypto_rng.generate` in the installed runtime. A booted probe did
+return a bounded byte, but boot also reported `no CPU RNG bootstrap`; this patch
+does not establish the quality/source of its initial seed or restart uniqueness.
+It does not substitute timestamps, deterministic PRNGs or fixtures for entropy.
+A verified, seeded signer entropy path is required before enabling real sealing.
+
+The bridge bounds passphrases to 1..128 bytes and keys to 32 bytes, tracks every
+staged byte, and clears staged passwords, scalars, derived keys and KDF workspace
+after success and failure. Only the explicit signer-internal open path can read
+unlocked key bytes; lock erases that buffer and every output too. The Soma wrapper
+reads its result then locks on success and failure. Its `OpenedKey` is secret and
+must never reach a browser/log; immutable copies in Soma/OCaml cannot be erased
+by clearing WASM. There is no retained key handle or authoritative lifecycle yet.
+There are no persistence calls, disk or browser storage, UI unlock controls, or
+restart-persistence claims. Persistence stays disabled until signer integration,
+erase-on-lock, durable format and actual persistence/restart checks pass.
+
+New `tests/vault-check.mjs` compares the whole deterministic public envelope with
+an independent libsodium Argon2id + XChaCha20-Poly1305 implementation invoked by
+`vault_reference.py`. The host check requires installed libsodium (`libsodium`
+on Homebrew, `libsodium23` on Debian; Python uses ctypes, no Python packages).
+It checks roundtrip, wrong passphrase, every flipped envelope byte, truncation,
+wrong version/parameters, incomplete/bad staging, wiped inputs and lock erasure.
+A fresh WASM instance reopens the public envelope with its passphrase; this is an
+instance-reset check, not persistence. `tests/vault_runtime.soma` and its new
+Python boot check exercise the typed seal/open/error/cleanup path in the actual
+unikernel and check that no scalar hex is logged. `./scripts/check` runs all of
+these alongside the existing wallet tests. The public scalar-one key, `pub`
+password, repeated 0x11 salt and repeated 0x22 nonce are test data only.
+
+
 ## Session policy model
 
 `wallet_session.soma` is a pure, typed state machine, separate from the served page.
