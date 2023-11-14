@@ -753,3 +753,56 @@ Python check then verifies the exported PSBT independently: map preservation,
 outputs and fee, funding ownership, the BIP 143 digest, and the OpenSSL
 signature with low-S. It also checks that no WIF or scalar hex appears in the
 logs.
+
+## Typed SWVP adapter (KDF gate closed)
+
+`wallet_vault_prod.soma` is the typed boundary over the SWVP exports.
+
+`seal_input_error` and `open_input_error` are pure checks, and each length is
+bounded before it is traversed:
+
+- passphrase: 1..128 octets
+- secret: exactly 32 octets
+- salt and nonce: the format's exact-field and octet checks
+
+Octets are checked to be below 256 before any numeric ABI call, so large binary
+N values never narrow into valid bytes. Envelopes must parse through
+`wallet_vault_format.soma` and re-serialize to the same bytes. That rejects SWVT,
+truncated and trailing envelopes, bad octets, and weak or unknown KDF policies
+before any KDF.
+
+The normal entry points are `seal_production` and `open_production`. Every exit
+evaluates its result and then calls the global `vault_lock`, which clears both
+SWVT and SWVP staging, derived values and outputs. That includes pure format
+errors, input-validation failures and the disabled path. A lock failure replaces
+the result.
+
+Booted Argon2id at the SWVP profile has not completed within 240 s (see above),
+so `production_kdf_enabled` is `false`. Valid inputs return `ProdKdfUnavailable`
+without staging secrets or running the KDF. They never return success,
+plaintext or an SWVT substitute. Status of each piece:
+
+- Typed validation and the fail-closed gates are live.
+- Production seal and open through Soma are unavailable.
+- The WASM primitives are verified on the host by `tests/vault-prod-check.mjs`.
+- The staging, seal and open code behind the gate has not been exercised booted.
+
+`vault_lock` erases WASM memory only. Passphrase and secret lists passed in by
+callers, and any future opened secret returned to Soma, are immutable runtime
+copies that it cannot erase.
+
+Tests:
+
+- `tests/vault_prod_codec.soma` with its `.exp` proves the pure codec and limit
+  expectations: the closed gate, passphrase, secret, salt and nonce bounds,
+  large-N octets, and SWVT, truncated, trailing, bad-octet and weak-memory
+  envelopes.
+- `tests/vault_prod_adapter.soma` with `tests/test_vault_prod_adapter.py` boots
+  the adapter. Before every call it dirties both SWVT and SWVP staging. After
+  each call it checks the typed rejection and that both audits and all four
+  envelope/plaintext readers are clear. Cases cover malformed envelopes,
+  oversized and large-N inputs, unknown policies and the disabled operations.
+
+Salt and nonce stay caller-supplied. Entropy-sourced salt and nonce, key-slot
+unlock, persistence and UI unlock remain unavailable. The vault protects and
+persists nothing yet.

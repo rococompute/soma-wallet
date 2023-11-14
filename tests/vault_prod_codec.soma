@@ -1,0 +1,12 @@
+Import wallet_psbt wallet_vault_format wallet_vault_prod.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** Pure codec/limit expectations for the typed SWVP adapter's input checks.
+    Public fixture values only; no WASM call is evaluated here. *)
+pass : list N := [112%N, 117%N, 98%N].
+secret : list N := List.repeat 0%N 31 ++ [1%N].
+salt : bytes := repeat 90 16%nat.
+nonce : bytes := repeat 165 24%nat.
+valid_raw : bytes := production_header production_profile salt nonce ++ repeat 7 48%nat.

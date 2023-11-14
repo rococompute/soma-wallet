@@ -1,0 +1,45 @@
+Theorem kdf_gate_closed : production_kdf_enabled = false.
+Proof. reflexivity. Qed.
+Theorem seal_inputs_valid : seal_input_error pass secret salt nonce = None.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_empty_passphrase : seal_input_error [] secret salt nonce = Some ProdPassphraseLength.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_long_passphrase :
+  seal_input_error (List.repeat 97%N 129) secret salt nonce = Some ProdPassphraseLength.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_large_n_passphrase :
+  seal_input_error [112%N, 4294967408%N] secret salt nonce = Some ProdPassphraseLength.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_short_secret :
+  seal_input_error pass (List.repeat 0%N 31) salt nonce = Some ProdSecretLength.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_long_secret :
+  seal_input_error pass (secret ++ [0%N]) salt nonce = Some ProdSecretLength.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_large_n_secret :
+  seal_input_error pass (List.repeat 0%N 31 ++ [4294967297%N]) salt nonce = Some ProdSecretByte.
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_short_salt :
+  seal_input_error pass secret (repeat 90 15%nat) nonce = Some (ProdFormat FormatFieldLength).
+Proof. vm_compute. reflexivity. Qed.
+Theorem seal_bad_nonce_octet :
+  seal_input_error pass secret salt (repeat 165 23%nat ++ [256]) = Some (ProdFormat FormatByteOutOfRange).
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_inputs_valid : open_input_error pass valid_raw = None.
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_swvt : open_input_error pass ([83,87,86,84] ++ skipn 4 valid_raw)
+  = Some (ProdFormat FormatTestEnvelope).
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_truncated : open_input_error pass (firstn 111 valid_raw) = Some (ProdFormat FormatTruncated).
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_trailing : open_input_error pass (valid_raw ++ [0]) = Some (ProdFormat FormatTooLong).
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_bad_octet : open_input_error pass (firstn 111 valid_raw ++ [300])
+  = Some (ProdFormat FormatByteOutOfRange).
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_weak_memory :
+  open_input_error pass (production_header (ProductionKdf 32768 3 4) salt nonce ++ repeat 7 48%nat)
+  = Some (ProdFormat FormatWeakMemory).
+Proof. vm_compute. reflexivity. Qed.
+Theorem open_empty_passphrase : open_input_error [] valid_raw = Some ProdPassphraseLength.
+Proof. vm_compute. reflexivity. Qed.

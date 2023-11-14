@@ -1,0 +1,86 @@
+Import wallet_psbt wallet_vault_format wallet_vault_prod wallet_key_runtime crypto.vault.
+Require Import Sandbox.
+
+(** Booted typed-adapter checks with PUBLIC fixtures only (passphrase "pub",
+    scalar-one secret, salt 16 x 0x5a, nonce 24 x 0xa5). The 64 MiB KDF gate
+    is closed, so valid inputs must stop at ProdKdfUnavailable. Before every
+    call both SWVT and SWVP staging are dirtied; after it, both audits and all
+    four output readers must be clear, with no plaintext or envelope. *)
+pass : list N := [112%N, 117%N, 98%N].
+secret : list N := List.repeat 0%N 31 ++ [1%N].
+ints (l : list N) : bytes := map public_byte l.
+salt : bytes := ints (List.repeat 90%N 16).
+nonce : bytes := ints (List.repeat 165%N 24).
+header : bytes := production_header production_profile salt nonce.
+valid_raw : bytes := header ++ ints (List.repeat 7%N 48).
+swvt_raw : bytes := ints [83%N, 87%N, 86%N, 84%N] ++ skipn 4 valid_raw.
+weak_raw : bytes := production_header (ProductionKdf (public_byte 0%N) (public_byte 3%N) (public_byte 4%N)) salt nonce ++ ints (List.repeat 7%N 48).
+lanes_raw : bytes := production_header (match production_profile with ProductionKdf m p _ => ProductionKdf m p (public_byte 1%N) end) salt nonce ++ ints (List.repeat 7%N 48).
+
+(** Both legacy SWVT and production SWVP audits and every output reader. *)
+wiped (token : unit) : bool :=
+  andb (N.eqb (vault_prod_cleared 0) 1)
+  (andb (N.eqb (vault_inputs_cleared 0) 1) (andb (N.eqb (vault_locked 0) 1)
+  (andb (N.eqb (vault_envelope_byte 0) 256) (andb (N.eqb (vault_opened_byte 0) 256)
+  (andb (N.eqb (vault_prod_envelope_byte 0) 256) (N.eqb (vault_prod_opened_byte 0) 256)))))).
+(** Dirty BOTH staging areas first (legacy first: vault_begin locks globally). *)
+prime (token : unit) : bool :=
+  if negb (N.eqb (vault_begin 3) 1) then false else
+  if negb (N.eqb (vault_put 0 0 112) 1) then false else
+  if negb (N.eqb (vault_prod_begin 3) 1) then false else
+  if negb (N.eqb (vault_prod_put 0 0 112) 1) then false else
+  andb (N.eqb (vault_inputs_cleared 0) 0) (N.eqb (vault_prod_cleared 0) 0).
+open_is (raw : bytes) (p : list N) (expected : vault_prod_error) : bool :=
+  if negb (prime tt) then false else
+  match open_production p raw, expected with
+  | ProdError (ProdFormat a), ProdFormat b =>
+    andb (match a, b with
+      | FormatTestEnvelope, FormatTestEnvelope | FormatTruncated, FormatTruncated
+      | FormatTooLong, FormatTooLong | FormatWeakMemory, FormatWeakMemory
+      | FormatLanes, FormatLanes => true | _, _ => false end) (wiped tt)
+  | ProdError ProdKdfUnavailable, ProdKdfUnavailable => wiped tt
+  | ProdError ProdPassphraseLength, ProdPassphraseLength => wiped tt
+  | _, _ => false
+  end.
+seal_is (p s : list N) (sa no : bytes) (expected : vault_prod_error) : bool :=
+  if negb (prime tt) then false else
+  match seal_production p s sa no, expected with
+  | ProdError ProdKdfUnavailable, ProdKdfUnavailable => wiped tt
+  | ProdError ProdSecretLength, ProdSecretLength => wiped tt
+  | ProdError ProdSecretByte, ProdSecretByte => wiped tt
+  | ProdError ProdPassphraseLength, ProdPassphraseLength => wiped tt
+  | ProdError (ProdFormat FormatFieldLength), ProdFormat FormatFieldLength => wiped tt
+  | _, _ => false
+  end.
+
+checks : list bool := [
+  negb production_kdf_enabled,
+  open_is valid_raw pass ProdKdfUnavailable,
+  open_is swvt_raw pass (ProdFormat FormatTestEnvelope),
+  open_is (firstn 111 valid_raw) pass (ProdFormat FormatTruncated),
+  open_is (valid_raw ++ ints [0%N]) pass (ProdFormat FormatTooLong),
+  open_is weak_raw pass (ProdFormat FormatWeakMemory),
+  open_is lanes_raw pass (ProdFormat FormatLanes),
+  open_is valid_raw [] ProdPassphraseLength,
+  seal_is pass secret salt nonce ProdKdfUnavailable,
+  seal_is pass (firstn 31 secret) salt nonce ProdSecretLength,
+  seal_is pass (firstn 31 secret ++ [256%N]) salt nonce ProdSecretByte,
+  seal_is [] secret salt nonce ProdPassphraseLength,
+  seal_is (List.repeat 97%N 129) secret salt nonce ProdPassphraseLength,
+  seal_is pass secret (firstn 15 salt) nonce (ProdFormat FormatFieldLength),
+  seal_is pass secret salt (nonce ++ ints [0%N]) (ProdFormat FormatFieldLength),
+  seal_is pass (firstn 31 secret ++ [4294967297%N]) salt nonce ProdSecretByte,
+  seal_is [112%N, 4294967408%N] secret salt nonce ProdPassphraseLength,
+  open_is valid_raw [4294967408%N] ProdPassphraseLength,
+  open_is (ints [83%N, 87%N, 86%N, 80%N]) pass (ProdFormat FormatTruncated),
+  open_is [] pass (ProdFormat FormatTruncated)].
+
+Fixpoint all_true (l : list bool) : bool := match l with [] => true | b :: r => andb b (all_true r) end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | ["adapter"] => if all_true checks
+      then print "PASS: booted SWVP typed adapter: format/length/large-N rejections and closed KDF gate, SWVT and SWVP state wiped"
+      else exit 1
+  | _ => exit 1 end.

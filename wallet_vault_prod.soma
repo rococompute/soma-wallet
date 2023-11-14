@@ -1,0 +1,137 @@
+(** Typed adapter for the SWVP v1 production primitives in crypto/vault.c.
+    Inputs and outputs go through wallet_vault_format.soma: envelopes are parsed
+    (and must re-serialize to the exact same bytes) before any WASM call, and
+    sealed bytes are re-parsed before they are returned. Salt and nonce are
+    caller-supplied. Not a key store and not persistence.
+
+    KDF gate: the SWVP profile needs a 64 MiB, 3-pass Argon2id. On host Node WASM
+    a seal takes about 150 ms, but the booted unikernel's WASM interpreter did
+    not finish one within 240 s (README). Until that changes,
+    [production_kdf_enabled] is false: after full validation, seal and open
+    return [ProdKdfUnavailable] without staging any secret or running the KDF.
+    The opened secret is returned only by [open_production], inside the signer;
+    never log or serialize it. vault_lock clears WASM memory, not immutable
+    copies held by callers or the runtime. *)
+Import wallet_psbt wallet_vault_format wallet_key_runtime crypto.vault.
+
+Inductive vault_prod_error :=
+| ProdFormat (error : vault_format_error)
+| ProdNotCanonical
+| ProdPassphraseLength | ProdSecretLength | ProdSecretByte
+| ProdKdfUnavailable
+| ProdAuthentication | ProdWorkspaceUnavailable | ProdBridge (code : N)
+| ProdNoOutput | ProdLockFailed.
+Inductive vault_prod_result (A : Type) := ProdOk (value : A) | ProdError (error : vault_prod_error).
+Arguments ProdOk {A} value.
+Arguments ProdError {A} error.
+(** Signer-internal secret from the explicit open path. *)
+Inductive prod_opened := ProdOpened (private_bytes : list N).
+
+production_kdf_enabled : bool := false.
+
+prod_error_of (code : N) : vault_prod_error :=
+  if N.eqb code 8 then ProdAuthentication else
+  if N.eqb code 10 then ProdWorkspaceUnavailable else ProdBridge code.
+
+Fixpoint octets_n (raw : list N) : bool :=
+  match raw with [] => true | b :: rest => andb (b <? 256)%N (octets_n rest) end.
+Fixpoint length_is_n (n : nat) (raw : list N) : bool :=
+  match n, raw with
+  | O, [] => true | S m, _ :: rest => length_is_n m rest | _, _ => false end.
+Fixpoint length_within_n (n : nat) (raw : list N) : bool :=
+  match n, raw with
+  | _, [] => true | O, _ :: _ => false | S m, _ :: rest => length_within_n m rest end.
+passphrase_ok (pass : list N) : bool :=
+  match pass with [] => false | _ => andb (length_within_n 128 pass) (octets_n pass) end.
+
+(** Always finish by locking, so staged and derived material never outlives
+    one call; a lock failure replaces the result. *)
+prod_finish {A : Type} (result : vault_prod_result A) : vault_prod_result A :=
+  if N.eqb (vault_lock 0) 1 then result else ProdError ProdLockFailed.
+
+Fixpoint prod_stage (slot index : N) (raw : list N) : bool :=
+  match raw with
+  | [] => true
+  | b :: rest => if N.eqb (vault_prod_put slot index b) 1 then prod_stage slot (index + 1)%N rest else false
+  end.
+Fixpoint prod_read (reader : N -> N) (remaining : nat) (index : N) : option (list N) :=
+  match remaining with
+  | O => Some []
+  | S more => let b := reader index in
+    if (b <? 256)%N then
+      match prod_read reader more (index + 1)%N with Some rest => Some (b :: rest) | None => None end
+    else None
+  end.
+to_n (raw : bytes) : list N := map runtime_byte raw.
+of_n (raw : list N) : bytes := map public_byte raw.
+
+(** Parse and require canonical bytes before anything else. *)
+validated_envelope (raw : bytes) : vault_prod_result production_envelope :=
+  match parse_production raw with
+  | FormatError e => ProdError (ProdFormat e)
+  | FormatOk env => match serialize_production env with
+    | FormatError e => ProdError (ProdFormat e)
+    | FormatOk again => if bytes_eqb again raw then ProdOk env else ProdError ProdNotCanonical
+    end
+  end.
+
+(** WASM seal; reached only when the KDF gate is enabled. *)
+seal_in_wasm (pass secret : list N) (salt nonce : bytes) : vault_prod_result production_envelope :=
+  if negb (N.eqb (vault_prod_begin (N.of_nat (List.length pass))) 1) then ProdError ProdPassphraseLength else
+  if negb (andb (prod_stage 0 0 pass) (andb (prod_stage 1 0 secret)
+      (andb (prod_stage 2 24 (to_n salt)) (prod_stage 2 40 (to_n nonce))))) then ProdError (ProdBridge 5) else
+  let code := vault_prod_seal 0 in
+  if negb (N.eqb code 1) then ProdError (prod_error_of code) else
+  match prod_read vault_prod_envelope_byte 112 0 with
+  | None => ProdError ProdNoOutput
+  | Some sealed => match validated_envelope (of_n sealed) with
+    | ProdError e => ProdError e
+    | ProdOk env => ProdOk env
+    end
+  end.
+
+(** Pure input checks, bounded before traversal and before any ABI use:
+    passphrase 1..128 octets, secret exactly 32 octets (each < 256, so large
+    binary N values never reach the numeric ABI), salt/nonce via the format's
+    exact field and octet checks. *)
+seal_input_error (pass secret : list N) (salt nonce : bytes) : option vault_prod_error :=
+  if negb (passphrase_ok pass) then Some ProdPassphraseLength else
+  if negb (length_is_n 32 secret) then Some ProdSecretLength else
+  if negb (octets_n secret) then Some ProdSecretByte else
+  match production_aad (ProductionEnvelope production_profile salt nonce
+          (of_n (List.repeat 0%N 32)) (of_n (List.repeat 0%N 16))) with
+  | FormatError e => Some (ProdFormat e)
+  | FormatOk _ => None
+  end.
+
+(** Normal entry point. Every exit, including validation failures and the
+    disabled KDF path, ends with the global vault_lock (SWVT and SWVP state). *)
+seal_production (pass secret : list N) (salt nonce : bytes) : vault_prod_result production_envelope :=
+  prod_finish (match seal_input_error pass secret salt nonce with
+  | Some e => ProdError e
+  | None => if production_kdf_enabled then seal_in_wasm pass secret salt nonce
+            else ProdError ProdKdfUnavailable
+  end).
+
+open_in_wasm (pass : list N) (raw : bytes) : vault_prod_result prod_opened :=
+  if negb (N.eqb (vault_prod_begin (N.of_nat (List.length pass))) 1) then ProdError ProdPassphraseLength else
+  if negb (andb (prod_stage 0 0 pass) (prod_stage 2 0 (to_n raw))) then ProdError (ProdBridge 5) else
+  let code := vault_prod_open 112 in
+  if negb (N.eqb code 1) then ProdError (prod_error_of code) else
+  match prod_read vault_prod_opened_byte 32 0 with
+  | None => ProdError ProdNoOutput
+  | Some secret => ProdOk (ProdOpened secret)
+  end.
+
+open_input_error (pass : list N) (raw : bytes) : option vault_prod_error :=
+  if negb (passphrase_ok pass) then Some ProdPassphraseLength else
+  match validated_envelope raw with ProdError e => Some e | ProdOk _ => None end.
+
+(** Normal entry point; plaintext is returned only on a real successful open,
+    never for a disabled or failed operation. Always ends with vault_lock. *)
+open_production (pass : list N) (raw : bytes) : vault_prod_result prod_opened :=
+  prod_finish (match open_input_error pass raw with
+  | Some e => ProdError e
+  | None => if production_kdf_enabled then open_in_wasm pass raw
+            else ProdError ProdKdfUnavailable
+  end).
