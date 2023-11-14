@@ -1,0 +1,77 @@
+Import crypto.signer.
+
+(** The existing WASM ABI accepts numeric scalars only. Keep its codes at the
+    boundary and expose distinct errors and byte results without Any.
+    These are effectful WASM operations despite their numeric ABI: invoke only
+    in a serialized runtime driver, never as proof computation or bare terms
+    with secret literals. Inputs belong to the unikernel, never the browser. *)
+Inductive bridge_error :=
+| BadIndex | BadByte | KeyIncomplete | DigestIncomplete | InvalidKey
+| CryptoFailure | NotBegun | BadLength | NoOutput | OutputIndex
+| UnknownCode (code : N).
+Inductive bridge_status := BridgeOk | BridgeFailure (error : bridge_error).
+Inductive public_byte_result := PublicByte (value : N) | ByteFailure (error : bridge_error).
+
+status_of (code : N) : bridge_status :=
+  if N.eqb code 1 then BridgeOk else BridgeFailure
+    (if N.eqb code 2 then BadIndex else
+     if N.eqb code 3 then BadByte else
+     if N.eqb code 4 then KeyIncomplete else
+     if N.eqb code 5 then DigestIncomplete else
+     if N.eqb code 6 then InvalidKey else
+     if N.eqb code 7 then CryptoFailure else
+     if N.eqb code 8 then NotBegun else
+     if N.eqb code 9 then BadLength else UnknownCode code).
+
+byte_of (code : N) : public_byte_result :=
+  if (code <? 256)%N then PublicByte code else ByteFailure
+    (if N.eqb code 256 then NoOutput else
+     if N.eqb code 257 then OutputIndex else UnknownCode code).
+
+begin_inputs (key_length digest_length : N) : bridge_status :=
+  status_of (bridge_begin key_length digest_length).
+put_key_byte (index byte : N) : bridge_status := status_of (bridge_key_byte index byte).
+put_digest_byte (index byte : N) : bridge_status := status_of (bridge_digest_byte index byte).
+derive_public (token : N) : bridge_status := status_of (bridge_derive token).
+request_signature (token : N) : bridge_status := status_of (bridge_sign token).
+clear_inputs (token : N) : bridge_status := status_of (bridge_clear token).
+inputs_cleared (token : N) : bool := N.eqb (bridge_inputs_cleared token) 1.
+read_public_byte (index : N) : public_byte_result := byte_of (bridge_public_byte index).
+read_compact_byte (index : N) : public_byte_result := byte_of (bridge_compact_byte index).
+read_der_byte (index : N) : public_byte_result := byte_of (bridge_der_byte index).
+
+(** Index/byte bound failures are handled inside WASM, wiping partial inputs.
+    Branching on each status makes the next call depend on its predecessor. *)
+Recursive stage_key (index : N) (bytes : list N) : bridge_status :=
+  match bytes with
+  | [] => BridgeOk
+  | b :: rest => match put_key_byte index b with
+                | BridgeOk => stage_key (index + 1)%N rest
+                | BridgeFailure e => BridgeFailure e
+                end
+  end.
+Recursive stage_digest (index : N) (bytes : list N) : bridge_status :=
+  match bytes with
+  | [] => BridgeOk
+  | b :: rest => match put_digest_byte index b with
+                | BridgeOk => stage_digest (index + 1)%N rest
+                | BridgeFailure e => BridgeFailure e
+                end
+  end.
+
+(** Consumes inputs on success AND error. On success read only the public
+    outputs, then call clear_inputs before the next serialized operation.
+    No wallet/session signing endpoint is wired to this low-level primitive. *)
+sign_runtime (key digest : list N) : bridge_status :=
+  match begin_inputs (N.of_nat (List.length key)) (N.of_nat (List.length digest)) with
+  | BridgeFailure e => BridgeFailure e
+  | BridgeOk =>
+      match stage_key 0 key with
+      | BridgeFailure e => BridgeFailure e
+      | BridgeOk =>
+          match stage_digest 0 digest with
+          | BridgeFailure e => BridgeFailure e
+          | BridgeOk => request_signature 0
+          end
+      end
+  end.

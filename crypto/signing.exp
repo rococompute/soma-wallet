@@ -1,0 +1,24 @@
+(** Pure decoding checks only: foreign cryptography is checked independently
+    by Node/OpenSSL and by an actual runtime unikernel, not by assumed axioms. *)
+Theorem status_codes_are_distinct :
+  status_of 1 = BridgeOk /\
+  status_of 4 = BridgeFailure KeyIncomplete /\
+  status_of 5 = BridgeFailure DigestIncomplete /\
+  status_of 6 = BridgeFailure InvalidKey /\
+  status_of 9 = BridgeFailure BadLength /\
+  status_of 0 = BridgeFailure (UnknownCode 0).
+Proof. repeat split; reflexivity. Qed.
+
+Theorem byte_errors_do_not_overlap :
+  byte_of 0 = PublicByte 0 /\ byte_of 255 = PublicByte 255 /\
+  byte_of 256 = ByteFailure NoOutput /\ byte_of 257 = ByteFailure OutputIndex.
+Proof. repeat split; reflexivity. Qed.
+
+Theorem public_byte_is_bounded : forall code byte,
+  byte_of code = PublicByte byte -> (byte < 256)%N.
+Proof.
+  intros code byte accepted. unfold byte_of in accepted.
+  destruct (code <? 256)%N eqn:bounded.
+  - inversion accepted; subst. apply N.ltb_lt. exact bounded.
+  - discriminate.
+Qed.

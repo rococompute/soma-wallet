@@ -77,6 +77,32 @@ never broadcasts transactions. Encrypted persistence must remain disabled until
 its authenticated-encryption, KDF and restart tests pass. Do not use real funds or
 real user keys with this development build.
 
+## Runtime signing primitive
+
+`crypto/signer.c` adds an import-free WASM primitive using the pinned
+libsecp256k1. It accepts all 32 key and digest bytes at runtime, derives a
+compressed public key, and produces RFC6979 deterministic, low-S ECDSA in DER
+and compact form after verifying the signature. `crypto/signer.definition`
+uses numeric types supported by Soma's existing ABI; `crypto/signing.soma`
+decodes statuses and public bytes into distinct result/error constructors.
+The original public scalar-one `probe` remains available unchanged.
+
+The bridge stages a single operation: begin with exact lengths, set indexed
+bytes, derive/sign, read public outputs, then clear. Every operation consumes
+and clears key/digest staging, including errors; volatile stores also clear
+the context workspace. Clear/lock clears public outputs too. There are no key
+readers. Callers must serialize this effectful interface inside the unikernel,
+use runtime input, branch on every status, and never supply secrets in bare
+compile-time terms, URLs, browser state or logs. The wrapper does not erase
+copies held by its caller or provide a vault, entropy source, or blinded context.
+
+`tests/signer-check.mjs` checks public scalar multiples, pinned published
+bitcoinjs RFC6979 vectors, independent Node/OpenSSL signature verification,
+malformed inputs and clearing. `tests/runtime_signer.soma` and its Python boot
+check exercise the typed bridge with a public fixture chosen at runtime.
+This primitive is not connected to PSBT parsing, transaction approval, or the UI;
+wallet signing and signed-PSBT export remain unavailable.
+
 ## Dependency provenance
 
 `vendor/secp256k1/` is copied from Bitcoin Core libsecp256k1 v0.6.0, commit

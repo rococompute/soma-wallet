@@ -1,0 +1,36 @@
+Import Sandbox.
+Import crypto.signing.
+
+(** Only a documented PUBLIC scalar-one fixture. args is read inside the
+    running image so the key supplied to WASM depends on runtime input.
+    No key bytes, digest, or private intermediate is ever printed. *)
+check_signature (selector : string) : bool :=
+  let last := if String.eqb selector "public-one" then 1%N else 0%N in
+  let key := List.repeat 0%N 31 ++ [last] in
+  match sign_runtime key (List.repeat 0%N 32) with
+  | BridgeFailure _ => false
+  | BridgeOk =>
+      match read_public_byte 0, read_public_byte 1, read_compact_byte 0 with
+      | PublicByte prefix, PublicByte x, PublicByte r =>
+          N.eqb prefix 2 && N.eqb x 121 && (r <? 256)%N &&
+          inputs_cleared 0
+      | _, _, _ => false
+      end
+  end.
+
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | [selector] =>
+      if check_signature selector then
+        match clear_inputs 0 with
+        | BridgeOk =>
+            match read_public_byte 0 with
+            | ByteFailure NoOutput => print "PASS: runtime typed signer and clear"
+            | _ => exit 1
+            end
+        | _ => exit 1
+        end
+      else exit 1
+  | _ => exit 1
+  end.

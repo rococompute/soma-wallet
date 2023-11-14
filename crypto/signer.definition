@@ -1,0 +1,14 @@
+(** Status: 1=ok, 2=index, 3=byte, 4=incomplete key, 5=incomplete digest,
+    6=invalid scalar, 7=crypto failure, 8=not begun, 9=length.
+    Readers return a byte or 256=no output / 257=index. No secret readers. *)
+bridge_clear : N -> N.
+bridge_begin : N -> N -> N.
+bridge_key_byte : N -> N -> N.
+bridge_digest_byte : N -> N -> N.
+bridge_derive : N -> N.
+bridge_sign : N -> N.
+bridge_public_byte : N -> N.
+bridge_compact_byte : N -> N.
+bridge_der_byte : N -> N.
+bridge_der_size : N -> N.
+bridge_inputs_cleared : N -> N.

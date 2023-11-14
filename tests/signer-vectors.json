@@ -1,0 +1,21 @@
+{
+  "source": "https://raw.githubusercontent.com/bitcoinjs/bitcoinjs-lib/v3.3.2/test/fixtures/ecdsa.json",
+  "note": "Published public test keys and RFC6979 low-S DER vectors, SHA256(message).",
+  "vectors": [
+    {
+      "d": "01",
+      "message": "Everything should be made as simple as possible, but not simpler.",
+      "signature": "3044022033a69cd2065432a30f3d1ce4eb0d59b8ab58c74f27c41a7fdb5696ad4e6108c902206f807982866f785d3f6418d24163ddae117b7db4d5fdf0071de069fa54342262"
+    },
+    {
+      "d": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "message": "Equations are more important to me, because politics is for the present, but an equation is something for eternity.",
+      "signature": "3044022054c4a33c6423d689378f160a7ff8b61330444abb58fb470f96ea16d99d4a2fed022007082304410efa6b2943111b6a4e0aaa7b7db55a07e9861d1fb3cb1f421044a5"
+    },
+    {
+      "d": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "message": "Not only is the Universe stranger than we think, it is stranger than we can think.",
+      "signature": "3045022100ff466a9f1b7b273e2f4c3ffe032eb2e814121ed18ef84665d0f515360dab3dd002206fc95f5132e5ecfdc8e5e6e616cc77151455d46ed48f5589b7db7771a332b283"
+    }
+  ]
+}
