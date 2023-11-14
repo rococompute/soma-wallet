@@ -1,0 +1,36 @@
+Import wallet_vault_entropy.
+Import crypto.vault.
+Require Import Sandbox.
+prime (token : unit) : bool :=
+  if negb (N.eqb (vault_begin 3) 1) then false else
+  if negb (N.eqb (vault_put 0 0 112) 1) then false else
+  if negb (N.eqb (vault_put 1 31 1) 1) then false else
+  if negb (N.eqb (vault_prod_begin 3) 1) then false else
+  if negb (N.eqb (vault_prod_put 0 0 112) 1) then false else
+  if negb (N.eqb (vault_prod_put 1 31 1) 1) then false else
+  andb (N.eqb (vault_inputs_cleared 0) 0) (N.eqb (vault_prod_cleared 0) 0).
+clear (token : unit) : bool :=
+  andb (N.eqb (vault_locked 0) 1) (andb (N.eqb (vault_inputs_cleared 0) 1)
+  (andb (N.eqb (vault_prod_cleared 0) 1) (andb (N.eqb (vault_envelope_byte 0) 256)
+  (andb (N.eqb (vault_opened_byte 0) 256) (andb (N.eqb (vault_prod_envelope_byte 0) 256)
+    (N.eqb (vault_prod_opened_byte 0) 256)))))).
+main : io unit :=
+  selectors <- args ;;
+  match selectors with
+  | ["public-refusal"] =>
+    (** Throwaway draw makes the normal/--no-random runtime seed control
+        explicit. It is discarded, unlogged, and NEVER a salt/nonce/key. *)
+    ignored <- random 256 ;;
+    if negb (prime tt) then exit 1 else
+    status <- verified_host_entropy_status tt ;;
+    match status with
+    | EntropyError EntropyUnverified =>
+      if negb (clear tt) then exit 2 else
+      if negb (prime tt) then exit 3 else
+      generated <- generate_swvp_salt_nonce tt ;;
+      match generated with
+      | EntropyError EntropyUnverified =>
+        if clear tt then print "PASS: entropy unverified; no salt or nonce; both vault interfaces cleared" else exit 4
+      | _ => exit 5 end
+    | _ => exit 6 end
+  | _ => exit 1 end.

@@ -1,0 +1,25 @@
+(** Fail-closed host-entropy boundary. Sandbox.random exposes a value, not
+    the source/availability result of solo5_random. There is no trusted status
+    input in this API, no RNG draw, fallback, caller default, or persistence.
+    Enable generation only after a real runtime capability is provided. *)
+Import crypto.vault.
+Require Import Sandbox.
+
+Inductive vault_entropy_error := EntropyUnverified | EntropyCleanupFailed (status : N).
+Inductive vault_entropy_result (A : Type) :=
+| EntropyOk (value : A) | EntropyError (error : vault_entropy_error).
+Arguments EntropyOk {A} value.
+Arguments EntropyError {A} error.
+Inductive swvp_entropy_material := SwvpEntropyMaterial (salt nonce : list N).
+
+finish_entropy {A : Type} (result : vault_entropy_result A) : vault_entropy_result A :=
+  match result with
+  | EntropyOk value => let status := vault_lock 0 in
+    if N.eqb status 1 then EntropyOk value else EntropyError (EntropyCleanupFailed status)
+  | EntropyError error => let status := vault_lock 0 in
+    if N.eqb status 1 then EntropyError error else EntropyError (EntropyCleanupFailed status)
+  end.
+verified_host_entropy_status (token : unit) : io (vault_entropy_result unit) :=
+  ret (finish_entropy (EntropyError EntropyUnverified)).
+generate_swvp_salt_nonce (token : unit) : io (vault_entropy_result swvp_entropy_material) :=
+  ret (finish_entropy (EntropyError EntropyUnverified)).

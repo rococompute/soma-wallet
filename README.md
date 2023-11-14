@@ -866,3 +866,43 @@ Tests:
 Salt and nonce stay caller-supplied. Entropy-sourced salt and nonce, key-slot
 unlock, persistence and UI unlock remain unavailable. The vault protects and
 persists nothing yet.
+
+## Production entropy status gate (generation unavailable)
+
+`wallet_vault_entropy.soma` adds `verified_host_entropy_status` and
+`generate_swvp_salt_nonce`. Both are runtime IO boundaries that currently return
+`EntropyError EntropyUnverified`, evaluate that result and then call global
+`vault_lock`. Cleanup failure replaces the result. Neither operation draws random
+bytes, returns salt/nonce material, invokes a KDF or persists anything. There is
+no caller boolean/default that can claim the host source is verified.
+
+The missing capability is specifically **program-observable host-entropy
+availability**. The installed `Soma/Sandbox.v` exposes `random : nat -> io nat`,
+not `solo5_random`'s success bit, RNG initialization source or a host-seed status.
+The installed mirage-crypto implementation
+(`rng/mirage/mirage_crypto_rng_mirage.ml`) calls `host_random` internally during
+`initialize`; `None` logs `no host entropy (solo5_random unavailable)` and seeds
+from CPU/whirlwind instead. Both branches subsequently satisfy the same
+`Sandbox.random` interface. That initialization log is observable by the host
+test runner, not a trusted input returned to the wallet. The app-local vault
+WASM has no host imports through which to query it. This finding concerns the
+documented Sandbox and existing WASM interfaces; a separately reviewed native
+binding is not implemented or ruled out by this step. Arguments, timestamps,
+statistical output checks and absence of a guessed pattern cannot supply this
+status, so they are not used to enable generation. These dependencies remain
+read-only.
+
+The earlier entropy probe still establishes that normal tender boots receive
+OS-seeded bytes and that `--no-random` selects the fallback. The new
+`tests/runtime_vault_entropy_gate.soma`/Python check boots both modes and confirms
+that the application refuses identically, emits no salt/nonce/key and clears
+both dirty SWVT and SWVP staging plus all four output readers. A discarded,
+unlogged test-only RNG draw exercises the seed-path control; it is never used
+as material. The normal boot must omit the fallback log and the negative boot
+must contain it. No statistical test substitutes for a status capability.
+
+A real exposed host-entropy status is required before generating a 16-byte salt
+and 24-byte nonce. No production generation is live, and nothing feeds invented
+values into the existing KDF-gated adapter. Practical production KDF execution,
+key-slot unlock/lock lifecycle, encrypted persistence/restart tests and UI unlock
+remain unavailable. WASM wiping cannot erase immutable copies held by callers.
