@@ -1,0 +1,27 @@
+(** Build-failing checked expectations for tests/psbt_validation.soma. *)
+Theorem byte_range_rejections :
+  error_of (parse_psbt (256 :: fixture)) = Some ByteOutOfRange /\
+  error_of (parse_psbt (fixture ++ [300])) = Some ByteOutOfRange /\
+  error_of (parse_tx (999 :: unsigned)) = Some ByteOutOfRange /\
+  error_of (parse_tx [1, 0, 0, 0, 256]) = Some ByteOutOfRange.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem amount_sum_boundaries :
+  error_of (parse_tx tx_sum_over) = Some TotalAmountOutOfRange /\
+  error_of (parse_tx tx_sum_exact) = None /\
+  error_of (parse_tx tx_sum_boundary) = None.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem metadata_rejected_for_digest :
+  error_of (digest_of (build global_tx ([0] ++ in1_nonwitness)) 1) = Some UnsupportedNonWitnessUtxo /\
+  error_of (digest_of (build global_tx ([0] ++ in1_redeem)) 1) = Some UnsupportedRedeemScript /\
+  error_of (digest_of (build global_tx ([0] ++ in1_witness_script)) 1) = Some UnsupportedWitnessScript.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem metadata_still_round_trips :
+  bind (parse_psbt (build global_tx ([0] ++ in1_nonwitness))) (fun q => Done (serialize_psbt q))
+    = Done (build global_tx ([0] ++ in1_nonwitness)).
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem unknown_global_round_trip : round_trip_unknown = Done fixture_unknown_global.
+Proof. vm_compute. reflexivity. Qed.

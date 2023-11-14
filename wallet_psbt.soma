@@ -48,7 +48,12 @@ Inductive parse_error :=
 | MissingWitnessUtxo
 | MalformedWitnessUtxo
 | UnsupportedScript
-| UnsupportedSighash.
+| UnsupportedSighash
+| ByteOutOfRange
+| TotalAmountOutOfRange
+| UnsupportedNonWitnessUtxo
+| UnsupportedRedeemScript
+| UnsupportedWitnessScript.
 
 Inductive outcome (A : Type) := Done (value : A) | Fail (error : parse_error).
 Arguments Done {A} value.
@@ -65,6 +70,14 @@ Fixpoint bytes_eqb (a b : bytes) : bool :=
   | [], [] => true
   | x :: a', y :: b' => if eqb x y then bytes_eqb a' b' else false
   | _, _ => false
+  end.
+
+(** Public entry points reject any integer outside the byte range 0..255;
+    the alias [list int] alone does not enforce it. *)
+Fixpoint bytes_in_range (b : bytes) : bool :=
+  match b with
+  | [] => true
+  | x :: r => andb (andb (negb (ltb x 0)) (negb (ltb 255 x))) (bytes_in_range r)
   end.
 
 (** little-endian value of at most 7 bytes (fits in 63 bits) *)
@@ -140,6 +153,17 @@ read_output (b : bytes) : outcome (tx_output * bytes) :=
     bind (read_var max_script_bytes ScriptTooLarge r) (fun p => let (script, r2) := p in
       Done (TxOut amount script, r2))).
 
+(** Total output value must not exceed MAX_MONEY. Each amount is already at
+    most MAX_MONEY and there are at most 64 outputs, so the running sum stays
+    far below the 63-bit wrap point and this comparison cannot overflow. *)
+Fixpoint check_total (outs : list tx_output) (acc : int) : outcome unit :=
+  match outs with
+  | [] => Done tt
+  | TxOut a _ :: rest =>
+      if ltb max_money (add acc a) then Fail TotalAmountOutOfRange
+      else check_total rest (add acc a)
+  end.
+
 Fixpoint read_many {A : Type} (fuel : nat) (item : bytes -> outcome (A * bytes))
     (n : int) (b : bytes) (acc : list A) : outcome (list A * bytes) :=
   if eqb n 0 then Done (rev acc, b) else
@@ -161,11 +185,13 @@ read_tx (b : bytes) : outcome (tx * bytes) :=
           if eqb nout 0 then Fail NoOutputs
           else if ltb max_tx_outputs nout then Fail TooManyOutputs else
           bind (read_many count_fuel read_output nout r4 []) (fun p => let (outs, r5) := p in
+            bind (check_total outs 0) (fun _ =>
             bind (take 4 r5) (fun p => let (lb, r6) := p in
-              Done (Tx version ins outs (le_value lb), r6))))))).
+              Done (Tx version ins outs (le_value lb), r6)))))))).
 
 (** the whole of [b] is one unsigned transaction *)
 parse_tx (b : bytes) : outcome tx :=
+  if negb (bytes_in_range b) then Fail ByteOutOfRange else
   bind (read_tx b) (fun p => let (t, r) := p in
     match r with [] => Done t | _ => Fail TrailingBytes end).
 
@@ -235,6 +261,7 @@ Inductive psbt := Psbt (global : psbt_map) (unsigned : tx)
 magic : bytes := [112, 115, 98, 116, 255].
 
 parse_psbt (b : bytes) : outcome psbt :=
+  if negb (bytes_in_range b) then Fail ByteOutOfRange else
   if ltb max_psbt_bytes (len b) then Fail InputTooLarge else
   if negb (bytes_eqb (firstn 5 b) magic) then Fail BadMagic else
   bind (read_map single_byte_global (skipn 5 b)) (fun p => let (g, r) := p in
@@ -281,6 +308,23 @@ p2wpkh_hash (script : bytes) : outcome bytes :=
   if andb (bytes_eqb (firstn 2 script) [0, 20]) (eqb (len script) 22)
   then Done (skipn 2 script) else Fail UnsupportedScript.
 
+(** Native P2WPKH policy: a digest is never produced from conflicting or
+    unsupported UTXO/script metadata for the selected input. Such entries are
+    still preserved by the parser for round trips; only the digest rejects. *)
+metadata_ok (m : psbt_map) : outcome unit :=
+  match lookup [0] m with
+  | Some _ => Fail UnsupportedNonWitnessUtxo
+  | None =>
+      match lookup [4] m with
+      | Some _ => Fail UnsupportedRedeemScript
+      | None =>
+          match lookup [5] m with
+          | Some _ => Fail UnsupportedWitnessScript
+          | None => Done tt
+          end
+      end
+  end.
+
 sighash_all_ok (m : psbt_map) : outcome unit :=
   match lookup [3] m with
   | None => Done tt
@@ -296,6 +340,7 @@ p2wpkh_sighash_all (p : psbt) (index : nat) : outcome bytes :=
   | Psbt _ (Tx version ins outs locktime) im _ =>
       match nth_error ins index, nth_error im index with
       | Some i, Some m =>
+          bind (metadata_ok m) (fun _ =>
           bind (sighash_all_ok m) (fun _ =>
           match lookup [1] m with
           | None => Fail MissingWitnessUtxo
@@ -312,7 +357,7 @@ p2wpkh_sighash_all (p : psbt) (index : nat) : outcome bytes :=
                   ++ dsha256 (serialize_outputs outs)
                   ++ le_bytes 4 locktime
                   ++ [1, 0, 0, 0]))))
-          end)
+          end))
       | _, _ => Fail InputIndexOutOfRange
       end
   end.

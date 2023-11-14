@@ -43,13 +43,26 @@ noncanonical or oversized CompactSize lengths, duplicate keys, invalid key
 lengths for fixed-key types, missing unsigned transactions, PSBT versions other
 than 0, witness-serialized or scriptSig-bearing unsigned transactions, empty or
 oversized input/output lists, out-of-range amounts and trailing bytes, each with
-a typed error. Limits: 100000 PSBT bytes, 64 map entries, 64 inputs/outputs,
-128-byte keys, 10000-byte scripts. Entries are kept in order, so a parsed PSBT
-serializes back to its exact bytes. The digest requires a P2WPKH witness UTXO
-and SIGHASH_ALL (or no sighash entry). `tests/psbt.soma` checks BIP 143's
-native P2WPKH example (fields, round trip, digest `c37af311...`) framed as a
-PSBT, and the rejections. Not yet: base64 input, BIP 174's published PSBT
-vectors, non-witness UTXO checks, and wiring into the UI or signer.
+a typed error. Public entry points also reject any integer outside the byte
+range 0..255 (`ByteOutOfRange`), and the total output value must not exceed
+MAX_MONEY (`TotalAmountOutOfRange`); per-output amounts are each capped first,
+so the bounded sum cannot overflow. Limits: 100000 PSBT bytes, 64 map entries,
+64 inputs/outputs, 128-byte keys, 10000-byte scripts. Entries are kept in
+order, so a parsed PSBT serializes back to its exact bytes. The digest
+requires a P2WPKH witness UTXO and SIGHASH_ALL (or no sighash entry), and
+explicitly rejects a selected input carrying a non-witness UTXO, redeem
+script or witness script (`UnsupportedNonWitnessUtxo` /
+`UnsupportedRedeemScript` / `UnsupportedWitnessScript`); those entries are
+still preserved by the parser for round trips, never used for a digest.
+`tests/psbt.soma` checks BIP 143's native P2WPKH example (fields, round trip,
+digest `c37af311...`) framed as a PSBT, and the rejections;
+`tests/psbt_validation.soma` (with `.exp`) adds byte-range, amount-sum
+boundary, conflicting-metadata and unknown-entry round-trip checks, and
+`tests/test_psbt_vectors.py` recomputes the BIP 143 digest independently
+with hashlib. Fixture provenance: BIP 143's published native-P2WPKH example,
+framed per BIP 174 (both at bitcoin/bips). Not yet: base64 input, BIP 174's
+published base64 PSBT vector suite vendored verbatim, P2SH/P2WSH or
+non-witness-UTXO digest policies, and wiring into the UI or signer.
 
 ## Development
 

@@ -1,0 +1,39 @@
+Import wallet_psbt.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+hex (s : string) : bytes := match bytes_of_hex s with Some l => l | None => [] end.
+
+(** Same published BIP 143 native-P2WPKH example as tests/psbt.soma,
+    framed as a PSBT v0 per BIP 174. New validation cases live here so the
+    existing test files stay untouched. *)
+unsigned_hex : string := "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac11000000".
+unsigned : bytes := hex unsigned_hex.
+witness_utxo : bytes := hex "0046c323000000001600141d0f172a0ecb48aee1be1f2687d2963ae33f71a1".
+fixture : bytes := hex ("70736274ff0100a0" ++ unsigned_hex ++ "000001011f0046c323000000001600141d0f172a0ecb48aee1be1f2687d2963ae33f71a1000000").
+
+kv (k v : bytes) : bytes := encode_var k ++ encode_var v.
+global_tx : bytes := kv [0] unsigned.
+in1 : bytes := kv [1] witness_utxo.
+build (global inputs : bytes) : bytes := magic ++ global ++ [0] ++ inputs ++ [0, 0, 0].
+error_of {A : Type} (r : outcome A) : option parse_error := match r with Done _ => None | Fail e => Some e end.
+digest_of (raw : bytes) (i : nat) : outcome bytes := bind (parse_psbt raw) (fun q => p2wpkh_sighash_all q i).
+
+(** A conflicting input map for input 1: witness UTXO plus one unsupported
+    metadata entry. The parser preserves it; the digest must refuse it. *)
+in1_nonwitness : bytes := in1 ++ kv [0] unsigned.
+in1_redeem : bytes := in1 ++ kv [4] [172].
+in1_witness_script : bytes := in1 ++ kv [5] [172].
+
+(** Amount-sum fixtures built with the module's own serializer. *)
+one_in : list tx_input := [TxIn (repeat 0 36%nat) (repeat 0 4%nat)].
+tx_sum_over : bytes := serialize_tx (Tx 1 one_in [TxOut max_money [], TxOut 1 []] 0).
+tx_sum_exact : bytes := serialize_tx (Tx 1 one_in [TxOut max_money []] 0).
+tx_sum_boundary : bytes := serialize_tx (Tx 1 one_in [TxOut (sub max_money 1) [], TxOut 1 []] 0).
+
+(** Supported BIP 174 framing variant: an extra unknown global entry
+    (key type 0x63 with key data) must be preserved in order, round-tripping
+    to the exact bytes. *)
+fixture_unknown_global : bytes := build (global_tx ++ kv [99, 7] [1, 2, 3]) ([0] ++ in1).
+round_trip_unknown : outcome bytes := bind (parse_psbt fixture_unknown_global) (fun q => Done (serialize_psbt q)).
