@@ -1,0 +1,452 @@
+(** Transaction review for the wallet page, from validated parser data only.
+    [review_of] turns a parsed PSBT (wallet_psbt) into what the page shows:
+    every input (txid, output index, witness-UTXO amount when present),
+    every output (amount, script kind, script, and for native P2WPKH its
+    testnet and regtest addresses), the output total and the fee, which is
+    reported unknown, with the reason, unless every input carries a witness
+    UTXO amount. [respond] serves the page: GET shows the import form; a
+    POST of a Base64 PSBT (form field [psbt]) to /review parses it with
+    [parse_psbt_base64] under its limits and shows the review or the typed
+    rejection. No key is involved: the served session is always [Locked],
+    so approval, signing and export are rendered unavailable from
+    [wallet_ui]'s model, never as working. *)
+Import wallet_psbt.
+Import wallet_keys.
+Import wallet_session.
+Import wallet_ui.
+Require Import Crypto.
+Require Import JSX.
+Require Import Soma.Show.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** ** Text of numbers and bytes *)
+Fixpoint decimal_digits (fuel : nat) (x : int) (acc : bytes) : bytes :=
+  match fuel with
+  | O => acc
+  | S f =>
+      let q := div x 10 in
+      let d := add 48 (sub x (mul q 10)) in
+      if eqb q 0 then d :: acc else decimal_digits f q (d :: acc)
+  end.
+decimal (x : int) : string := string_of_bytes (decimal_digits 20%nat x []).
+
+Fixpoint pad_zeros (fuel : nat) (b : bytes) : bytes :=
+  match fuel with
+  | O => b
+  | S f => if list_within b 7 then pad_zeros f (48 :: b) else b
+  end.
+(** satoshis as BTC with eight decimals *)
+btc (sats : int) : string :=
+  let whole := div sats 100000000 in
+  string_of_bytes (decimal_digits 20%nat whole [] ++ [46]
+    ++ pad_zeros 8%nat (decimal_digits 20%nat (sub sats (mul whole 100000000)) [])).
+
+nibble (x : int) : int := if ltb x 10 then add 48 x else add 87 x.
+hex_text (b : bytes) : string := string_of_bytes (flat_map (fun x => [nibble (lsr x 4), nibble (land x 15)]) b).
+
+(** ** Review data *)
+Inductive input_view := InputView (txid : string) (vout : int) (amount : option int).
+Inductive output_view := OutputView (amount : int) (kind : string) (script : string) (addresses : list string).
+(** Input amounts are what the PSBT's witness UTXOs claim; they are not
+    authenticated here. [FeeNegative] is an inconsistency, not a missing
+    amount. *)
+Inductive fee_view := Fee (total_in : int) (sats : int) | FeeUnavailable (reason : string) | FeeNegative (total_in : int).
+Inductive review := Review (version : int) (locktime : int) (inputs : list input_view)
+  (outputs : list output_view) (total_out : int) (fee : fee_view).
+
+witness_amount (m : psbt_map) : option int :=
+  match lookup [1] m with
+  | None => None
+  | Some wu => match parse_witness_utxo wu with Done (a, _) => Some (le_value a) | Fail _ => None end
+  end.
+
+input_view_of (i : tx_input) (m : option psbt_map) : input_view :=
+  match i with
+  | TxIn prevout _ =>
+      InputView (hex_text (rev (firstn 32 prevout))) (le_value (skipn 32 prevout))
+        (match m with Some m' => witness_amount m' | None => None end)
+  end.
+
+Fixpoint inputs_view (ins : list tx_input) (maps : list psbt_map) : list input_view :=
+  match ins with
+  | [] => []
+  | i :: rest => input_view_of i (hd_error maps) :: inputs_view rest (tl maps)
+  end.
+
+address_text (n : network) (h : bytes) : list string :=
+  match bech32_address n h with KDone a => [string_of_bytes a] | KFail _ => [] end.
+
+output_view_of (o : tx_output) : output_view :=
+  match o with
+  | TxOut amount script =>
+      match p2wpkh_hash script with
+      | Done h => OutputView amount "Native P2WPKH" (hex_text script) (address_text Testnet h ++ address_text Regtest h)
+      | Fail _ =>
+          if andb (list_within script 25) (andb (bytes_eqb (firstn 3 script) [118, 169, 20])
+               (bytes_eqb (skipn 23 script) [136, 172]))
+          then OutputView amount "P2PKH (legacy)" (hex_text script) []
+          else OutputView amount "Other script" (hex_text script) []
+      end
+  end.
+
+Fixpoint known_total (ins : list input_view) (acc : int) : option int :=
+  match ins with
+  | [] => Some acc
+  | InputView _ _ (Some a) :: rest => known_total rest (add acc a)
+  | InputView _ _ None :: _ => None
+  end.
+
+output_amount (o : tx_output) : int := match o with TxOut a _ => a end.
+
+review_of (p : psbt) : review :=
+  match p with
+  | Psbt _ (Tx version ins outs locktime) im _ =>
+      let iv := inputs_view ins im in
+      let total := fold_left (fun acc o => add acc (output_amount o)) outs 0 in
+      Review version locktime iv (map output_view_of outs) total
+        (match known_total iv 0 with
+         | None => FeeUnavailable "At least one input has no well-formed witness UTXO amount, so the input total and the fee are unavailable."
+         | Some t => if ltb t total then FeeNegative t else Fee t (sub t total)
+         end)
+  end.
+
+error_text (e : parse_error) : string :=
+  match e with
+  | Truncated => "the data ends early"
+  | NoncanonicalCompactSize => "a length is not canonically encoded"
+  | LengthTooLarge => "a length exceeds its limit"
+  | InputTooLarge => "the PSBT exceeds the 100000-byte limit"
+  | BadMagic => "it does not start with the PSBT magic"
+  | TooManyEntries => "a map has too many entries"
+  | DuplicateKey => "a map repeats a key"
+  | InvalidKeyLength => "a key has the wrong length for its type"
+  | MissingUnsignedTx => "the unsigned transaction is missing"
+  | UnsupportedPsbtVersion => "only PSBT version 0 is supported"
+  | UnsupportedTxVersion => "the transaction version or shape is not supported"
+  | WitnessSerializedUnsignedTx => "the unsigned transaction is witness-serialized"
+  | NoInputs => "the transaction has no inputs"
+  | NoOutputs => "the transaction has no outputs"
+  | TooManyInputs => "the transaction has too many inputs"
+  | TooManyOutputs => "the transaction has too many outputs"
+  | NonEmptyScriptSig => "an unsigned input has a scriptSig"
+  | ScriptTooLarge => "a script exceeds its limit"
+  | AmountOutOfRange => "an amount exceeds 21 million BTC"
+  | TrailingBytes => "data follows the end of the PSBT"
+  | InputIndexOutOfRange => "an input index is out of range"
+  | MissingWitnessUtxo => "an input has no witness UTXO"
+  | MalformedWitnessUtxo => "a witness UTXO is malformed"
+  | wallet_psbt.UnsupportedScript => "a script form is not supported"
+  | UnsupportedSighash => "only SIGHASH_ALL is supported"
+  | wallet_psbt.ByteOutOfRange => "a byte value is out of range"
+  | TotalAmountOutOfRange => "the outputs total more than 21 million BTC"
+  | UnsupportedNonWitnessUtxo => "non-witness UTXOs are not supported"
+  | UnsupportedRedeemScript => "redeem scripts are not supported"
+  | UnsupportedWitnessScript => "witness scripts are not supported"
+  | InvalidBase64Char => "the text is not Base64"
+  | InvalidBase64Padding => "the Base64 padding is not canonical"
+  end.
+
+(** ** The request: a bounded form body *)
+max_request_chars : int := 300000.
+
+Fixpoint string_within (s : string) (budget : int) : bool :=
+  match s with
+  | Stdlib.Strings.String.EmptyString => true
+  | Stdlib.Strings.String.String _ rest => if eqb budget 0 then false else string_within rest (sub budget 1)
+  end.
+
+starts_with (prefix b : bytes) : bool := bytes_eqb (firstn (length prefix) b) prefix.
+
+Fixpoint body_of (b : bytes) : bytes :=
+  match b with
+  | [] => []
+  | _ :: rest => if starts_with [13, 10, 13, 10] b then skipn 4 b else body_of rest
+  end.
+
+hex_value (c : int) : int :=
+  if andb (negb (ltb c 48)) (negb (ltb 57 c)) then sub c 48
+  else if andb (negb (ltb c 65)) (negb (ltb 70 c)) then sub c 55
+  else if andb (negb (ltb c 97)) (negb (ltb 102 c)) then sub c 87
+  else 999.
+
+(** Ordinary URL-form decoding of the one field's value: '+' is a space and
+    every decoded character is kept, so whitespace or any other character
+    that is not Base64 reaches [parse_psbt_base64] and is rejected there;
+    nothing is dropped or truncated. A malformed escape or a second field
+    ('&') is [None]. *)
+Fixpoint form_value (b : bytes) : option bytes :=
+  match b with
+  | [] => Some []
+  | c :: rest =>
+      if eqb c 38 then None
+      else if eqb c 37 then
+        match rest with
+        | h :: l :: rest' =>
+            if orb (eqb (hex_value h) 999) (eqb (hex_value l) 999) then None
+            else match form_value rest' with
+                 | None => None
+                 | Some r => Some (lor (lsl (hex_value h) 4) (hex_value l) :: r)
+                 end
+        | _ => None
+        end
+      else match form_value rest with
+           | None => None
+           | Some r => Some ((if eqb c 43 then 32 else c) :: r)
+           end
+  end.
+
+(** ** HTTP/1.1 framing of the first read *)
+Fixpoint head_of (b : bytes) : bytes :=
+  match b with
+  | [] => []
+  | c :: rest => if starts_with [13, 10, 13, 10] b then [] else c :: head_of rest
+  end.
+
+Fixpoint has_head_end (b : bytes) : bool :=
+  match b with
+  | [] => false
+  | _ :: rest => if starts_with [13, 10, 13, 10] b then true else has_head_end rest
+  end.
+
+Fixpoint lines_acc (b cur : bytes) : list bytes :=
+  match b with
+  | [] => [rev cur]
+  | c :: rest =>
+      match rest with
+      | d :: rest' => if andb (eqb c 13) (eqb d 10) then rev cur :: lines_acc rest' [] else lines_acc rest (c :: cur)
+      | [] => [rev (c :: cur)]
+      end
+  end.
+
+lower (c : int) : int := if andb (negb (ltb c 65)) (negb (ltb 90 c)) then add c 32 else c.
+
+Fixpoint split_colon (l name : bytes) : option (bytes * bytes) :=
+  match l with
+  | [] => None
+  | c :: rest => if eqb c 58 then Some (rev name, rest) else split_colon rest (lower c :: name)
+  end.
+
+Fixpoint drop_space (b : bytes) : bytes :=
+  match b with [] => [] | c :: rest => if orb (eqb c 32) (eqb c 9) then drop_space rest else b end.
+trim (b : bytes) : bytes := rev (drop_space (rev (drop_space b))).
+
+(** the values of every header line named [name] (lowercase) *)
+header_values (name : bytes) (lines : list bytes) : list bytes :=
+  flat_map (fun l => match split_colon l [] with
+                     | Some (n, v) => if bytes_eqb n name then [trim v] else []
+                     | None => []
+                     end) lines.
+
+(** a Content-Length: one to six decimal digits *)
+Fixpoint digits_value (b : bytes) (acc : int) : option int :=
+  match b with
+  | [] => Some acc
+  | c :: rest => if andb (negb (ltb c 48)) (negb (ltb 57 c)) then digits_value rest (add (mul acc 10) (sub c 48)) else None
+  end.
+content_length (v : bytes) : option int :=
+  match v with
+  | [] => None
+  | _ => if list_within v 6 then digits_value v 0 else None
+  end.
+
+count (b : bytes) : int := fold_left (fun n _ => add n 1) b 0.
+
+(** [serve] passes a handler only what a connection sends first. A POST is
+    reviewed only when that read holds its whole framing: complete headers,
+    exactly one well-formed Content-Length, no Transfer-Encoding, and a body
+    of exactly that length. A shorter body (the rest would arrive later and
+    be lost) is [BodyIncomplete]; anything else ambiguous is [BadFraming]. *)
+Inductive request := Home | ReviewRequest (psbt_chars : option bytes)
+  | BodyIncomplete | BadFraming (why : string) | TooLarge.
+
+post_request (b : bytes) : request :=
+  if negb (has_head_end b) then BodyIncomplete else
+  let lines := tl (lines_acc (head_of b) []) in
+  let body := body_of b in
+  match header_values (bytes_of_string "transfer-encoding") lines with
+  | _ :: _ => BadFraming "Transfer-Encoding is not supported"
+  | [] =>
+      match header_values (bytes_of_string "content-length") lines with
+      | [] => BadFraming "a POST needs a Content-Length"
+      | [v] =>
+          match content_length v with
+          | None => BadFraming "the Content-Length is malformed"
+          | Some n =>
+              if ltb (count body) n then BodyIncomplete
+              else if ltb n (count body) then BadFraming "the body is longer than its Content-Length"
+              else ReviewRequest (if starts_with (bytes_of_string "psbt=") body then form_value (skipn 5 body) else None)
+          end
+      | _ => BadFraming "more than one Content-Length"
+      end
+  end.
+
+request_of (r : string) : request :=
+  if negb (string_within r max_request_chars) then TooLarge else
+  let b := bytes_of_string r in
+  if starts_with (bytes_of_string "POST /review ") b then post_request b else Home.
+
+(** ** Pages *)
+txt (parts : list string) : string := Stdlib.Strings.String.concat "" parts.
+
+css : string := "body{font-family:system-ui,sans-serif;margin:0 auto;max-width:52rem;padding:1rem;line-height:1.45;color:#1a1a1a;background:#fff}section{border-top:1px solid #c9c9c9;padding:0.75rem 0}h1{font-size:1.5rem}h2{font-size:1.1rem;margin:0.25rem 0}button{font:inherit;padding:0.35rem 0.8rem}textarea{width:100%;box-sizing:border-box;font-family:monospace}table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:0.3rem;border-bottom:1px solid #e0e0e0;vertical-align:top}td code{word-break:break-all}@media (max-width:40rem){body{padding:0.75rem}th,td{display:block}}".
+
+(** the served session: no key can be imported from the page in this build *)
+served : session := Locked.
+
+reason_of (a : ui_action) : string :=
+  match availability_of a served with Available => "" | Unavailable r => r end.
+
+action_button (a : ui_action) (label : string) : element unit :=
+  <p> <button disabled="disabled"> label </button> " " (reason_of a) </p>.
+
+layout (content : element unit) : element unit :=
+  <html>
+    <head>
+      <title> "Offline Bitcoin Wallet" </title>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style> css </style>
+    </head>
+    <body>
+      <main>
+        <h1> "Offline Bitcoin Wallet" </h1>
+        <p> "An offline testnet/regtest signing workspace in development. It never broadcasts; never load real keys." </p>
+        <section>
+          <h2> "Status" </h2>
+          <p> (status_line served) </p>
+        </section>
+        content
+        <section>
+          <h2> "Signing and export" </h2>
+          (action_button ApproveAction "Approve")
+          (action_button SignAction "Sign transaction")
+          (action_button ExportAction "Export signed PSBT")
+          (action_button LockAction "Lock wallet")
+        </section>
+      </main>
+    </body>
+  </html>.
+
+import_form : element unit :=
+  <section>
+    <h2> "Review a PSBT" </h2>
+    <p> "Paste a PSBT v0 in Base64. It is parsed under fixed limits and every input and output is shown; nothing is signed." </p>
+    <form method="post" action="/review">
+      <label> "PSBT (Base64)" <textarea name="psbt" rows="6" required="required"> "" </textarea> </label>
+      <p> <button type="submit"> "Review PSBT" </button> </p>
+    </form>
+  </section>.
+
+key_section : element unit :=
+  <section>
+    <h2> "Key import" </h2>
+    <p> "Key import is not connected to this page in this build: the key stays in the signing unikernel and only a public identity (network, public key, address) will ever be shown here." </p>
+    <p> <button disabled="disabled"> "Import key" </button> </p>
+  </section>.
+
+home_page : element unit := layout (fragment [key_section, import_form]).
+
+input_row (i : input_view) : element unit :=
+  match i with
+  | InputView txid vout amount =>
+      <tr>
+        <td> <code> txid </code> </td>
+        <td> (decimal vout) </td>
+        <td> (match amount with Some a => txt [decimal a, " sat (claimed by the PSBT)"] | None => "unavailable (no well-formed witness UTXO)" end) </td>
+      </tr>
+  end.
+
+address_line (a : string) : element unit := <div> <code> a </code> </div>.
+addresses_view (l : list string) : element unit := fragment (map address_line l).
+
+output_row (o : output_view) : element unit :=
+  match o with
+  | OutputView amount kind script addresses =>
+      <tr>
+        <td> (txt [decimal amount, " sat"]) <br /> (txt [btc amount, " BTC"]) </td>
+        <td> kind </td>
+        <td> <code> script </code> (addresses_view addresses) </td>
+      </tr>
+  end.
+
+output_rows (l : list output_view) : element unit := fragment (map output_row l).
+input_rows (l : list input_view) : element unit := fragment (map input_row l).
+
+fee_text (f : fee_view) : string :=
+  match f with
+  | Fee _ s => txt [decimal s, " sat (", btc s, " BTC)"]
+  | FeeUnavailable r => txt ["unavailable: ", r]
+  | FeeNegative _ => "unavailable: the inputs claim less than the outputs pay, so this PSBT is inconsistent."
+  end.
+
+total_in_text (f : fee_view) : string :=
+  match f with
+  | Fee t _ => txt [decimal t, " sat (", btc t, " BTC), as claimed by the PSBT's witness UTXOs"]
+  | FeeNegative t => txt [decimal t, " sat (", btc t, " BTC), as claimed by the PSBT's witness UTXOs"]
+  | FeeUnavailable _ => "unavailable"
+  end.
+
+review_page (r : review) : element unit :=
+  match r with
+  | Review version locktime ins outs total fee =>
+      layout
+        <section>
+          <h2> "Transaction review" </h2>
+          <p> "Version " (decimal version) ", locktime " (decimal locktime) ". Review every output and the fee." </p>
+          <h3> "Outputs" </h3>
+          <table>
+            <thead> <tr> <th> "Amount" </th> <th> "Kind" </th> <th> "Script and addresses (testnet, regtest)" </th> </tr> </thead>
+            <tbody> (output_rows outs) </tbody>
+          </table>
+          <p> "Total out: " (txt [decimal total, " sat (", btc total, " BTC)"]) </p>
+          <p> "Total in: " (total_in_text fee) </p>
+          <p> "Fee: " (fee_text fee) </p>
+          <h3> "Inputs" </h3>
+          <p> "No inputs are selected for signing: this is a read-only review." </p>
+          <table>
+            <thead> <tr> <th> "Previous txid" </th> <th> "Output" </th> <th> "Amount" </th> </tr> </thead>
+            <tbody> (input_rows ins) </tbody>
+          </table>
+          <p> <a href="/"> "Review another PSBT" </a> </p>
+        </section>
+  end.
+
+rejection_page (why : string) : element unit :=
+  layout
+    <section>
+      <h2> "PSBT rejected" </h2>
+      <p> (txt ["This PSBT was not accepted: ", why, "."]) </p>
+      <p> <a href="/"> "Try another PSBT" </a> </p>
+    </section>.
+
+page_for (r : request) : element unit :=
+  match r with
+  | Home => home_page
+  | TooLarge => rejection_page "the request exceeds the size limit"
+  | BodyIncomplete => rejection_page "the request did not arrive whole in its first packet, which is all this server reads, so nothing was reviewed; submit it again"
+  | BadFraming why => rejection_page (txt ["the request framing is not supported: ", why])
+  | ReviewRequest None => rejection_page "the form did not carry exactly one well-formed psbt field"
+  | ReviewRequest (Some chars) =>
+      match parse_psbt_base64 chars with
+      | Done p => review_page (review_of p)
+      | Fail e => rejection_page (error_text e)
+      end
+  end.
+
+respond (r : string) : string := render (page_for (request_of r)).
+
+(** The HTTP response: HTML with its own content type (Wire's
+    [http_response] says text/plain, so a browser would show the source),
+    no sniffing, and a policy allowing only inline styles and forms posted
+    back to this page. *)
+crlf : string := string_of_bytes [13, 10].
+html_response (body : string) : string :=
+  txt ["HTTP/1.1 200 OK", crlf,
+       "Content-Type: text/html; charset=utf-8", crlf,
+       "X-Content-Type-Options: nosniff", crlf,
+       "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'", crlf,
+       "Cache-Control: no-store", crlf,
+       "Content-Length: ", to_string (Stdlib.Strings.String.length body), crlf,
+       "Connection: close", crlf, crlf, body].
+
+serve_response (request : string) : string := html_response (respond request).

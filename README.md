@@ -152,12 +152,49 @@ become available only in the states the session model allows; signing and
 signed-PSBT export are reported unavailable with their reason in every
 state until a session driver connects them, so no page built on this
 model can present an unconnected operation as working. Session errors
-have user-facing messages here. `main.soma` now serves the locked page built on this model: a status
-section plus key-import, PSBT-import, transaction-review, signing,
-signed-export and lock sections, each control disabled with the model's
-reason for the locked state. Wiring page actions to a session driver
-(submitting a WIF or PSBT, rendering a parsed transaction, approving,
-signing, exporting) remains follow-up work, and the page copy says so.
+have user-facing messages here. The served page (next section) is built on this model: its key-import,
+approval, signing, export and lock controls render disabled with the model's
+reason for the `Locked` session it serves. PSBT import and review are live;
+wiring the other actions to a session driver remains follow-up work, and the
+page copy says so.
+
+## Served wallet page: PSBT import and review
+
+`main.soma` serves `wallet_review.respond`. `GET /` shows the locked wallet and
+a PSBT import form; `POST /review` with a Base64 PSBT in the form field `psbt`
+decodes it (requests over 300000 characters are refused before any decoding;
+`parse_psbt_base64` applies the parser's limits) and renders every output
+(amount in sat and BTC, script kind, script hex, and for native P2WPKH its
+testnet and regtest addresses) and the output total. It also renders every input
+in transaction order (previous txid and output index, plus the amount its
+witness UTXO claims, labelled as a PSBT claim) and states that no input is
+selected for signing in this read-only review. The input total and fee follow:
+both are unavailable unless every input has a well-formed witness-UTXO amount,
+and a fee that would be negative is shown as an inconsistency, not as a missing
+amount. Routes: `GET /` (anything other than `POST /review` gets this page) and
+`POST /review`. Rejections show the parser's typed error in words. Live: PSBT import
+and full review (public data only, no key involved). Unavailable: key import,
+approval, signing, export and lock. The served session is always `Locked`, so
+these actions render disabled with `wallet_ui`'s reasons, and nothing claims
+they work. Responses are `text/html; charset=utf-8` with `X-Content-Type-Options: nosniff`,
+`Cache-Control: no-store` and a Content-Security-Policy that allows only inline
+styles and forms posted back to the page (Wire's `http_response` says text/plain,
+so a browser would show the source). Framing: `serve` gives the handler only what a
+connection sends first. A POST is reviewed only when that read holds complete
+headers, exactly one Content-Length (one to six digits), no Transfer-Encoding,
+and a body of exactly that length. A shorter body, including a valid PSBT prefix
+whose rest would come later, is reported as not having arrived whole. A longer
+body, or a missing, duplicate or malformed length, or chunked framing, is rejected
+by name. The form value is decoded as ordinary URL-form data ('+' is a space)
+and every character is kept, so inserted whitespace makes `parse_psbt_base64`
+reject the text instead of being silently dropped; a second field is refused.
+PSBTs larger than one packet cannot be reviewed yet. `tests/review.soma` checks the BIP 143 example's review,
+the fee (known, unavailable, negative) and address cases, number formatting, the complete response head byte for byte, and the
+served pages for raw HTTP requests. `tests/test_ui_http.py` boots `main.hvt`
+host-only and isolated (as `scripts/run` does) and checks over HTTP the HTML
+content type and length, the form and disabled actions, the fixture's review, a
+typed rejection, a late body and a short-but-valid-prefix body reported as not
+arriving whole, and whitespace inside the Base64 rejected.
 
 ## Development
 

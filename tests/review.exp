@@ -1,0 +1,77 @@
+(** Build-failing checked expectations for tests/review.soma. *)
+Theorem number_text :
+  decimal 0 = "0" /\ decimal 2100000000000000 = "2100000000000000" /\
+  btc 112340000 = "1.12340000" /\ btc 5 = "0.00000005" /\ btc 0 = "0.00000000".
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** every output and input of BIP 143's example, with the fee unknown
+    because input 0 has no witness UTXO *)
+Theorem bip143_review :
+  output_summary (review_bytes bip143) = [(112340000, "P2PKH (legacy)", []), (223450000, "P2PKH (legacy)", [])] /\
+  input_summary (review_bytes bip143) =
+    [("9f96ade4b41d5433f4eda31e1738ec2b36f6e7d1420d94a6af99801a88f7f7ff", 0, None),
+     ("8ac60eb9575db5b2d987e29f301b5b819ea83a5c6579d282d189cc04b8e151ef", 1, Some 600000000)] /\
+  totals (review_bytes bip143) = Some (335790000, FeeUnavailable "At least one input has no well-formed witness UTXO amount, so the input total and the fee are unavailable.").
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem fee_and_addresses :
+  totals (review_bytes both_amounts) = Some (335790000, Fee 1225000000 889210000) /\
+  totals (review_bytes to_self) = Some (599990000, Fee 600000000 10000) /\
+  output_summary (review_bytes to_self) =
+    [(599990000, "Native P2WPKH", ["tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"])].
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** the served pages: the form, the review, typed rejections, and actions
+    that stay unavailable while the served session is Locked *)
+Theorem served_pages :
+  contains "Review a PSBT" (respond get_request) = true /\
+  contains "Transaction review" (respond get_request) = false /\
+  contains "Import a key first." (respond get_request) = true /\
+  contains "Transaction review" (respond fixture_request) = true /\
+  contains "1.12340000 BTC" (respond fixture_request) = true /\
+  contains "2.23450000 BTC" (respond fixture_request) = true /\
+  contains "600000000 sat" (respond fixture_request) = true /\
+  contains "<button disabled=""disabled"">Sign transaction</button>" (respond fixture_request) = true /\
+  contains "the Base64 padding is not canonical" (respond short_request) = true /\
+  contains "did not carry exactly one well-formed psbt field" (respond bad_escape_request) = true /\
+  contains "did not carry exactly one well-formed psbt field" (respond no_field_request) = true.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** served as HTML (not Wire's text/plain), and a body that never arrived is
+    reported as such *)
+Theorem served_as_html :
+  response_head get_request = true /\ response_head fixture_request = true /\
+  contains "did not arrive whole" (respond empty_body_request) = true.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** a negative fee is reported as an inconsistency, not as a missing amount *)
+Theorem negative_fee :
+  totals (review_bytes negative) = Some (335790000, FeeNegative 3).
+Proof. vm_compute. reflexivity. Qed.
+
+(** the complete response head, byte for byte *)
+Theorem complete_response :
+  bytes_of_string (html_response "ok") = [72, 84, 84, 80, 47, 49, 46, 49, 32, 50, 48, 48, 32, 79, 75, 13, 10, 67, 111, 110, 116, 101, 110, 116, 45, 84, 121, 112, 101, 58, 32, 116, 101, 120, 116, 47, 104, 116, 109, 108, 59, 32, 99, 104, 97, 114, 115, 101, 116, 61, 117, 116, 102, 45, 56, 13, 10, 88, 45, 67, 111, 110, 116, 101, 110, 116, 45, 84, 121, 112, 101, 45, 79, 112, 116, 105, 111, 110, 115, 58, 32, 110, 111, 115, 110, 105, 102, 102, 13, 10, 67, 111, 110, 116, 101, 110, 116, 45, 83, 101, 99, 117, 114, 105, 116, 121, 45, 80, 111, 108, 105, 99, 121, 58, 32, 100, 101, 102, 97, 117, 108, 116, 45, 115, 114, 99, 32, 39, 110, 111, 110, 101, 39, 59, 32, 115, 116, 121, 108, 101, 45, 115, 114, 99, 32, 39, 117, 110, 115, 97, 102, 101, 45, 105, 110, 108, 105, 110, 101, 39, 59, 32, 102, 111, 114, 109, 45, 97, 99, 116, 105, 111, 110, 32, 39, 115, 101, 108, 102, 39, 13, 10, 67, 97, 99, 104, 101, 45, 67, 111, 110, 116, 114, 111, 108, 58, 32, 110, 111, 45, 115, 116, 111, 114, 101, 13, 10, 67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104, 58, 32, 50, 13, 10, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 58, 32, 99, 108, 111, 115, 101, 13, 10, 13, 10, 111, 107].
+Proof. vm_compute. reflexivity. Qed.
+
+(** Framing: only a first read holding the whole declared body is reviewed;
+    a VALID fixture prefix shorter than its Content-Length is not. *)
+Theorem framing :
+  contains "did not arrive whole" (respond incomplete_request) = true /\
+  contains "Transaction review" (respond incomplete_request) = false /\
+  contains "longer than its Content-Length" (respond longer_request) = true /\
+  contains "needs a Content-Length" (respond no_length_request) = true /\
+  contains "more than one Content-Length" (respond two_lengths_request) = true /\
+  contains "Transfer-Encoding is not supported" (respond chunked_request) = true /\
+  contains "Content-Length is malformed" (respond bad_length_request) = true.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** Form decoding keeps every character: whitespace or '+' (a space) inside
+    the Base64 is rejected, never dropped; a second field is refused. *)
+Theorem no_silent_changes :
+  contains "the text is not Base64" (respond space_request) = true /\
+  contains "the text is not Base64" (respond newline_request) = true /\
+  contains "the text is not Base64" (respond plus_request) = true /\
+  contains "did not carry exactly one well-formed psbt field" (respond second_field_request) = true /\
+  form_value [97, 43, 98, 37, 50, 48, 99] = Some [97, 32, 98, 32, 99].
+Proof. vm_compute. repeat split; reflexivity. Qed.
