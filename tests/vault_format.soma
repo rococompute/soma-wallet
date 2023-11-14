@@ -1,0 +1,36 @@
+Import wallet_vault_format.
+Import wallet_psbt.
+Require Import Crypto.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+(** Synthetic public framing data only, NOT authenticated ciphertext. The
+    independent Python check reconstructs these exact bytes with struct. *)
+hex (text : string) : bytes := match bytes_of_hex text with Some raw => raw | None => [] end.
+fixture_hex : string := "535756500101130100044000000001000300000020001018000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a55a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a".
+fixture : bytes := hex fixture_hex.
+salt : bytes := hex "000102030405060708090a0b0c0d0e0f".
+nonce : bytes := hex "101112131415161718191a1b1c1d1e1f2021222324252627".
+ciphertext : bytes := repeat 165 32%nat.
+tag : bytes := repeat 90 16%nat.
+model : production_envelope := ProductionEnvelope production_profile salt nonce ciphertext tag.
+error_of {A : Type} (r : format_result A) : option vault_format_error :=
+  match r with FormatOk _ => None | FormatError error => Some error end.
+replace_byte (offset : nat) (value : int) (raw : bytes) : bytes :=
+  firstn offset raw ++ [value] ++ skipn (S offset) raw.
+replace_word (offset count : nat) (value : int) (raw : bytes) : bytes :=
+  firstn offset raw ++ le_bytes count value ++ skipn (Nat.add offset count) raw.
+parse_changed (offset : nat) (value : int) : option vault_format_error :=
+  error_of (parse_production (replace_byte offset value fixture)).
+header_mutations_rejected : bool := forallb (fun n =>
+  match parse_production (replace_byte n (lxor (nth n fixture 0) 1) fixture) with
+  | FormatError _ => true | FormatOk _ => false end) (seq 0%nat 24%nat).
+body_mutations_parse : bool := forallb (fun n =>
+  let changed := replace_byte n (lxor (nth n fixture 0) 1) fixture in
+  match parse_production changed with
+  | FormatError _ => false
+  | FormatOk e => match serialize_production e with
+    | FormatError _ => false | FormatOk raw => bytes_eqb raw changed end end)
+  (seq 24%nat 88%nat).
+serialize_fields (s n c t : bytes) : option vault_format_error :=
+  error_of (serialize_production (ProductionEnvelope production_profile s n c t)).

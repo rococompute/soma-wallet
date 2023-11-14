@@ -106,6 +106,72 @@ unikernel and check that no scalar hex is logged. `./scripts/check` runs all of
 these alongside the existing wallet tests. The public scalar-one key, `pub`
 password, repeated 0x11 salt and repeated 0x22 nonce are test data only.
 
+## Production vault format and KDF policy proposal
+
+`wallet_vault_format.soma` is a pure, bounded framing layer for a future vault.
+It contains no key/password input, KDF, AEAD, IO, randomness or persistence.
+`parse_production` accepts syntax only; `FormatOk` does **not** mean a valid MAC,
+decrypted key or permission to save/unlock anything. The SWVT test bridge remains
+unchanged; production sealing still fails with `VaultEntropyUnavailable`.
+
+Version 1 reserves magic **SWVP** and accepts exactly Argon2id v19 with
+**65536 KiB (64 MiB), 3 passes, 4 lanes and a 32-byte derived key**. This is
+[RFC 9106 section 4's second recommended profile](https://www.rfc-editor.org/rfc/rfc9106.html#section-4),
+with a 16-byte salt. Both lower and higher costs are rejected: version 1 has one
+supported profile, so a file cannot select a weak KDF or excessive workspace/time.
+Four lanes affect the derived key even when computed sequentially, as explained
+in [Monocypher's Argon2 documentation](https://monocypher.org/manual/argon2).
+The future implementation must use all four lanes, without silently rounding or
+substituting the test KDF. This policy has not been calibrated or executed in the
+unikernel; it does not establish that the current interpreter can support it.
+
+The canonical envelope is exactly **112 bytes**. Integers are little endian.
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 4 | ASCII `SWVP` |
+| 4 | 1 | Format version = 1 |
+| 5 | 1 | KDF = 1 (Argon2id) |
+| 6 | 1 | Argon2 version = 19 |
+| 7 | 1 | AEAD = 1 (XChaCha20-Poly1305) |
+| 8 | 1 | Reserved flags = 0 |
+| 9 | 1 | Lanes = 4 |
+| 10 | 2 | Header size = 64 |
+| 12 | 4 | Memory KiB = 65536 |
+| 16 | 4 | Passes = 3 |
+| 20 | 2 | Ciphertext size = 32 |
+| 22 | 1 | Salt size = 16 |
+| 23 | 1 | Nonce size = 24 |
+| 24 | 16 | Salt |
+| 40 | 24 | Nonce |
+| 64 | 32 | Ciphertext |
+| 96 | 16 | AEAD tag (distinct from the 32-byte KDF output) |
+
+`production_aad` returns **all first 64 bytes**, including salt and nonce, for
+the future AEAD operation; ciphertext and tag follow. Unknown algorithms or
+versions, nonzero flags, inconsistent sizes, weak/unsupported costs, non-octets,
+truncation and trailing data are typed rejections. The parser walks at most 113
+list cells before rejecting oversized input and never allocates a KDF workspace.
+The serializer revalidates constructed models and each bounded field; it cannot
+silently truncate/normalize oversized costs or emit an invalid model. SWVT is
+never upgraded or reinterpreted as SWVP. Changes to supported profiles require
+an explicit format/policy review, not attacker-supplied parameter negotiation.
+
+New `tests/vault_format.soma`/`.exp` check exact parsing, serialization and AAD,
+every fixed-header byte, lower/upper KDF boundaries, byte/field/size limits and
+test-format separation. Salt/nonce/ciphertext/tag mutations remain syntactically
+parseable: authentication is deliberately future AEAD work. The committed public
+fixture uses arbitrary ciphertext/tag patterns and is **not** an encrypted key or
+valid MAC. `tests/test_vault_format.py` reconstructs its wire bytes independently
+using Python `struct`, including the 32-bit cost fields and all field offsets.
+These checks run under `./scripts/check`; no production KDF boot is implied.
+
+Still required before real use: verified seeded entropy and unique salt/nonce,
+production KDF/AEAD execution and hardware calibration, authenticated open before
+exposing plaintext, signer/session ownership and erase-on-lock, then encrypted
+persistence with actual restart tests and UI unlock. Persistence remains disabled
+and this remains a development-only format proposal.
+
 
 ## Session policy model
 

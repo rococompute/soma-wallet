@@ -1,0 +1,111 @@
+(** Pure production-format proposal. Parsing is NOT authentication, decryption,
+    key ownership or permission to persist. No Sandbox/WASM/KDF/key inputs.
+    The separate SWVT test bridge is unchanged and production sealing remains
+    disabled. A future AEAD bridge must authenticate ALL [production_aad]. *)
+Import wallet_psbt.
+From Corelib Require Import PrimInt63.
+Local Open Scope uint63_scope.
+
+Inductive vault_format_error :=
+| FormatTooLong | FormatTruncated | FormatByteOutOfRange
+| FormatTestEnvelope | FormatBadMagic | FormatVersion
+| FormatKdf | FormatKdfVersion | FormatAead | FormatReserved
+| FormatHeaderLength | FormatCiphertextLength | FormatSaltLength | FormatNonceLength
+| FormatWeakMemory | FormatExcessMemory | FormatWeakPasses | FormatExcessPasses
+| FormatLanes | FormatFieldLength.
+Inductive format_result (A : Type) := FormatOk (value : A) | FormatError (error : vault_format_error).
+Arguments FormatOk {A} value.
+Arguments FormatError {A} error.
+
+Inductive production_kdf := ProductionKdf (memory_kib passes lanes : int).
+(** RFC 9106 section 4's second recommended Argon2id profile: v19,
+    64 MiB, 3 passes, 4 lanes, 16-byte salt and 32-byte derived key.
+    Version 1 supports exactly this profile: no cost negotiation, rounding or
+    attacker-selected workspace. Execution/calibration is still future work. *)
+production_profile : production_kdf := ProductionKdf 65536 3 4.
+
+kdf_policy_error (p : production_kdf) : option vault_format_error :=
+  match p with ProductionKdf memory passes lanes =>
+    if ltb memory 65536 then Some FormatWeakMemory else
+    if ltb 65536 memory then Some FormatExcessMemory else
+    if ltb passes 3 then Some FormatWeakPasses else
+    if ltb 3 passes then Some FormatExcessPasses else
+    if negb (eqb lanes 4) then Some FormatLanes else None
+  end.
+
+Inductive production_envelope := ProductionEnvelope
+  (profile : production_kdf) (salt nonce ciphertext tag : bytes).
+production_magic : bytes := [83,87,86,80]. (* SWVP; never SWVT *)
+production_header_size : nat := 64%nat.
+production_envelope_size : nat := 112%nat.
+
+(** Header offsets: magic0, format4, KDF5, KDF-version6, AEAD7, flags8,
+    lanes9, header-size10 LE16, memory12 LE32, passes16 LE32,
+    ciphertext-size20 LE16, salt-size22, nonce-size23, salt24, nonce40. *)
+production_header (p : production_kdf) (salt nonce : bytes) : bytes :=
+  match p with ProductionKdf memory passes lanes =>
+    production_magic ++ [1,1,19,1,0,lanes] ++ le_bytes 2 64 ++
+    le_bytes 4 memory ++ le_bytes 4 passes ++ [32,0,16,24] ++ salt ++ nonce
+  end.
+
+(** Bound each caller-supplied field BEFORE length/range traversal or copying. *)
+Fixpoint exact_field (n : nat) (raw : bytes) : bool :=
+  match n, raw with
+  | O, [] => true
+  | S more, _ :: rest => exact_field more rest
+  | _, _ => false
+  end.
+
+envelope_error (e : production_envelope) : option vault_format_error :=
+  match e with ProductionEnvelope p salt nonce ciphertext tag =>
+    match kdf_policy_error p with
+    | Some error => Some error
+    | None =>
+      if negb (andb (exact_field 16%nat salt) (andb (exact_field 24%nat nonce)
+        (andb (exact_field 32%nat ciphertext) (exact_field 16%nat tag))))
+      then Some FormatFieldLength else
+      if negb (andb (bytes_in_range salt) (andb (bytes_in_range nonce)
+        (andb (bytes_in_range ciphertext) (bytes_in_range tag))))
+      then Some FormatByteOutOfRange else None
+    end
+  end.
+
+(** This is the exact future AEAD associated data, NOT a secret or a MAC.
+    Revalidate model constructors, including fields, rather than trusting types. *)
+production_aad (e : production_envelope) : format_result bytes :=
+  match envelope_error e with
+  | Some error => FormatError error
+  | None => match e with ProductionEnvelope p salt nonce _ _ =>
+    FormatOk (production_header p salt nonce) end
+  end.
+
+serialize_production (e : production_envelope) : format_result bytes :=
+  match production_aad e with
+  | FormatError error => FormatError error
+  | FormatOk header => match e with ProductionEnvelope _ _ _ ciphertext tag =>
+    FormatOk (header ++ ciphertext ++ tag) end
+  end.
+
+field_le (offset size : nat) (raw : bytes) : int := le_value (firstn size (skipn offset raw)).
+
+parse_production (raw : bytes) : format_result production_envelope :=
+  if negb (list_within raw 112) then FormatError FormatTooLong else
+  if negb (bytes_in_range raw) then FormatError FormatByteOutOfRange else
+  if negb (Nat.eqb (List.length raw) production_envelope_size) then FormatError FormatTruncated else
+  if bytes_eqb (firstn 4 raw) [83,87,86,84] then FormatError FormatTestEnvelope else
+  if negb (bytes_eqb (firstn 4 raw) production_magic) then FormatError FormatBadMagic else
+  if negb (eqb (nth 4 raw 0) 1) then FormatError FormatVersion else
+  if negb (eqb (nth 5 raw 0) 1) then FormatError FormatKdf else
+  if negb (eqb (nth 6 raw 0) 19) then FormatError FormatKdfVersion else
+  if negb (eqb (nth 7 raw 0) 1) then FormatError FormatAead else
+  if negb (eqb (nth 8 raw 0) 0) then FormatError FormatReserved else
+  if negb (eqb (field_le 10%nat 2%nat raw) 64) then FormatError FormatHeaderLength else
+  if negb (eqb (field_le 20%nat 2%nat raw) 32) then FormatError FormatCiphertextLength else
+  if negb (eqb (nth 22 raw 0) 16) then FormatError FormatSaltLength else
+  if negb (eqb (nth 23 raw 0) 24) then FormatError FormatNonceLength else
+  let p := ProductionKdf (field_le 12%nat 4%nat raw) (field_le 16%nat 4%nat raw) (nth 9 raw 0) in
+  match kdf_policy_error p with
+  | Some error => FormatError error
+  | None => FormatOk (ProductionEnvelope p (firstn 16 (skipn 24 raw))
+      (firstn 24 (skipn 40 raw)) (firstn 32 (skipn 64 raw)) (skipn 96 raw))
+  end.

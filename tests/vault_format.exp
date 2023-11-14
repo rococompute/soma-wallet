@@ -1,0 +1,78 @@
+Theorem production_fixture_parses : parse_production fixture = FormatOk model.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem production_fixture_serializes : serialize_production model = FormatOk fixture.
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem production_aad_covers_complete_header :
+  production_aad model = FormatOk (firstn 64 fixture) /\
+  List.length (firstn 64 fixture) = production_header_size /\
+  List.length fixture = production_envelope_size.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem production_profile_limits :
+  map kdf_policy_error
+    [ProductionKdf 64 3 4, ProductionKdf 65535 3 4,
+     ProductionKdf 65536 3 4, ProductionKdf 65537 3 4,
+     ProductionKdf 4294967295 3 4,
+     ProductionKdf 65536 0 4, ProductionKdf 65536 2 4,
+     ProductionKdf 65536 4 4, ProductionKdf 65536 4294967295 4,
+     ProductionKdf 65536 3 0, ProductionKdf 65536 3 1,
+     ProductionKdf 65536 3 8] =
+    [Some FormatWeakMemory, Some FormatWeakMemory, None,
+     Some FormatExcessMemory, Some FormatExcessMemory,
+     Some FormatWeakPasses, Some FormatWeakPasses,
+     Some FormatExcessPasses, Some FormatExcessPasses,
+     Some FormatLanes, Some FormatLanes, Some FormatLanes].
+Proof. vm_compute. reflexivity. Qed.
+
+Theorem production_rejects_header_changes :
+  header_mutations_rejected = true /\
+  parse_changed 4 2 = Some FormatVersion /\
+  parse_changed 5 2 = Some FormatKdf /\
+  parse_changed 6 16 = Some FormatKdfVersion /\
+  parse_changed 7 2 = Some FormatAead /\
+  parse_changed 8 1 = Some FormatReserved /\
+  parse_changed 9 1 = Some FormatLanes /\
+  parse_changed 10 63 = Some FormatHeaderLength /\
+  parse_changed 20 31 = Some FormatCiphertextLength /\
+  parse_changed 22 15 = Some FormatSaltLength /\
+  parse_changed 23 23 = Some FormatNonceLength.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem production_parser_checks_wire_costs :
+  error_of (parse_production (replace_word 12 4 64 fixture)) = Some FormatWeakMemory /\
+  error_of (parse_production (replace_word 12 4 65535 fixture)) = Some FormatWeakMemory /\
+  error_of (parse_production (replace_word 12 4 65537 fixture)) = Some FormatExcessMemory /\
+  error_of (parse_production (replace_word 12 4 4294967295 fixture)) = Some FormatExcessMemory /\
+  error_of (parse_production (replace_word 16 4 2 fixture)) = Some FormatWeakPasses /\
+  error_of (parse_production (replace_word 16 4 4 fixture)) = Some FormatExcessPasses.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem production_parser_bounds_and_test_separation :
+  map (fun n => error_of (parse_production (firstn n fixture)))
+    [0,4,24,63,64,96,111]%nat = repeat (Some FormatTruncated) 7 /\
+  error_of (parse_production (fixture ++ [0])) = Some FormatTooLong /\
+  error_of (parse_production (repeat 0 10000)) = Some FormatTooLong /\
+  error_of (parse_production ([83,87,86,84] ++ skipn 4 fixture)) = Some FormatTestEnvelope /\
+  error_of (parse_production (replace_byte 0 0 fixture)) = Some FormatBadMagic /\
+  error_of (parse_production (replace_byte 64 256 fixture)) = Some FormatByteOutOfRange /\
+  error_of (parse_production (replace_byte 64 9223372036854775807 fixture)) = Some FormatByteOutOfRange.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Theorem production_serializer_validates_models :
+  serialize_fields (firstn 15 salt) nonce ciphertext tag = Some FormatFieldLength /\
+  serialize_fields salt (nonce ++ [0]) ciphertext tag = Some FormatFieldLength /\
+  serialize_fields salt nonce (firstn 31 ciphertext) tag = Some FormatFieldLength /\
+  serialize_fields salt nonce ciphertext (tag ++ [0]) = Some FormatFieldLength /\
+  serialize_fields (repeat 0 10000) nonce ciphertext tag = Some FormatFieldLength /\
+  serialize_fields (replace_byte 0 256 salt) nonce ciphertext tag = Some FormatByteOutOfRange /\
+  serialize_fields salt nonce ciphertext (replace_byte 0 256 tag) = Some FormatByteOutOfRange /\
+  error_of (serialize_production (ProductionEnvelope (ProductionKdf 64 3 1)
+    salt nonce ciphertext tag)) = Some FormatWeakMemory.
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+(** Syntax acceptance is deliberately NOT authentication. Variable salt,
+    nonce, ciphertext and tag bytes need future AEAD verification. *)
+Theorem body_changes_are_only_syntactic : body_mutations_parse = true.
+Proof. vm_compute. reflexivity. Qed.
