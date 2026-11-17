@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """Serialized host checks; paths are relative to this exact bid checkout."""
-import fcntl, os, pathlib, subprocess, sys
-root=pathlib.Path(__file__).resolve().parents[1]
+import argparse, contextlib, fcntl, os, pathlib, subprocess, sys
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--checkout',type=pathlib.Path,default=pathlib.Path(__file__).resolve().parents[1])
+parser.add_argument('--lock-fd',type=int)
+args=parser.parse_args()
+root=args.checkout.resolve()
 env=os.environ.copy();env['SOMA_MIRAGE_SWITCH']='hvf'
-with open('/private/tmp/soma-wallet-build.lock','a') as lock:
-    fcntl.flock(lock,fcntl.LOCK_EX)
+lock_path='/private/tmp/soma-wallet-build.lock'
+if args.lock_fd is not None:
+    held=os.fstat(args.lock_fd);expected=os.stat(lock_path)
+    if (held.st_dev,held.st_ino)!=(expected.st_dev,expected.st_ino):
+        parser.error('--lock-fd does not identify the wallet build lock')
+with (contextlib.nullcontext() if args.lock_fd is not None else open(lock_path,'a')) as lock:
+    if lock is not None: fcntl.flock(lock,fcntl.LOCK_EX)
     subprocess.run(['./scripts/build-crypto'],cwd=root,env=env,check=True)
-    for file in ['main.soma','crypto/smoke.soma']+[str(p.relative_to(root)) for p in sorted((root/'tests').glob('*.soma'))]:
-        subprocess.run(['opam','exec','--switch=hvf','--','soma','build',file],cwd=root,env=env,check=True)
+    command=['opam','exec','--switch=hvf','--',env.get('SOMA','soma')]
+    tests=['main.soma','crypto/smoke.soma','tests']
+    changed=['--changedSince',env['SOMA_CI_BASE']] if env.get('SOMA_CI_BASE') else []
+    subprocess.run(command+['test']+tests+changed,cwd=root,env=env,check=True)
     result=subprocess.run(['timeout','90','opam','exec','--switch=hvf','--','solo5-hvt','--mem=256','--',str(root/'crypto/smoke.hvt')],cwd=root,env=env,capture_output=True,text=True)
     if result.returncode or 'flags = 31' not in result.stdout or 'private key is rejected = 0' not in result.stdout:
         print(result.stdout);print(result.stderr,file=sys.stderr);sys.exit(1)

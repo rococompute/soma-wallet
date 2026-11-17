@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Operator's local Pantheon CI adapter: MEMORY CHECKOUT COMMAND.
+
+Retain a serialized workspace and its last passing Git snapshot. Source bytes
+always come from the exact requested candidate. Only compiler records and
+verified generated images survive between candidates; all external tests run.
+This is a local development runner, not a security sandbox.
+"""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = Path(__file__).resolve().parent
+LOCK = Path('/private/tmp/soma-wallet-build.lock')
+
+def digest(path):
+    with path.open('rb') as f:
+        return hashlib.file_digest(f, 'sha256').hexdigest()
+
+def atomic(path, value):
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix='.ci-')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(value, f, sort_keys=True)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+def sources(root):
+    result = {}
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d != '.git')
+        for name in dirs + files:
+            path = Path(directory) / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink(): raise ValueError('symlink source is unsupported: ' + rel)
+            if '.soma-cache' in path.relative_to(root).parts:
+                raise ValueError('candidate contains reserved compiler cache: ' + rel)
+            if path.is_file(): result[rel] = [digest(path), path.stat().st_mode & 0o777]
+    return result
+
+def sync(candidate, work, previous, incoming):
+    # A removed definition must not remain importable through an old .vo/.wasm.
+    # Shape changes use a cold workspace while retaining only the Git baseline.
+    if set(previous) != set(incoming):
+        for child in work.iterdir():
+            if child.name == '.git': continue
+            if child.is_dir() and not child.is_symlink(): shutil.rmtree(child)
+            else: child.unlink()
+    else:
+        generated = {'.hvt', '.wasm', '.exe', '.vo', '.vos', '.vok', '.glob', '.aux', '.img', '.disk'}
+        for directory, dirs, files in os.walk(work):
+            dirs[:] = [d for d in dirs if d not in {'.git', '.soma-cache'}]
+            for name in files:
+                path = Path(directory) / name
+                if path.relative_to(work).as_posix() not in incoming and path.suffix not in generated:
+                    path.unlink()
+    for name in sorted(set(previous) - set(incoming), reverse=True):
+        path = work / name
+        if path.is_file() or path.is_symlink(): path.unlink()
+    for name, (sha, mode) in incoming.items():
+        target = work / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink(): target.unlink()
+        if not target.is_file() or digest(target) != sha:
+            shutil.copyfile(candidate / name, target)
+        target.chmod(mode)
+
+def git(work, *args, capture=False):
+    command = ['git', '-C', str(work), '-c', 'core.hooksPath=/dev/null',
+               '-c', 'user.name=Wallet CI cache', '-c', 'user.email=ci@example.invalid',
+               '-c', 'commit.gpgsign=false', *args]
+    return subprocess.run(command, check=True, text=True,
+                          stdout=subprocess.PIPE if capture else subprocess.DEVNULL).stdout
+
+def image_manifest(work):
+    return {p.relative_to(work).as_posix(): digest(p) for p in work.rglob('*.hvt') if p.is_file()}
+
+def image_cache_valid(work, saved):
+    return saved is not None and all((work / p).is_file() and digest(work / p) == sha
+                                     for p, sha in saved.items())
+
+def main():
+    if len(sys.argv) != 4: raise ValueError('expected MEMORY CHECKOUT COMMAND')
+    # The node wraps the trusted --ci-repo command before invoking an adapter.
+    match = re.match(r'^\( timeout ([1-9][0-9]*) \./scripts/check\n\) 2>&1;', sys.argv[3])
+    if not match: raise ValueError('expected the wallet timeout ./scripts/check CI command')
+    candidate = Path(sys.argv[2]).resolve()
+    cache = Path(os.environ['WALLET_CI_CACHE']).expanduser().resolve()
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    work = cache / 'workspace'
+    work.mkdir(exist_ok=True)
+    env = os.environ.copy()
+    env['SOMA_MIRAGE_SWITCH'] = 'hvf'
+    env['SOMA_CACHE'] = str(cache / 'compiled-modules')
+    env['SOMA_CI_BASE'] = 'HEAD'
+    soma = shutil.which(env.get('SOMA', 'soma'))
+    if soma is None: raise ValueError('Soma executable is missing')
+    env['SOMA'] = soma
+    started = time.monotonic()
+    with LOCK.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        print(f'CI cache: build lock acquired after {time.monotonic()-started:.2f}s; execution budget starts now', flush=True)
+        packages = subprocess.check_output(['opam', 'list', '--switch=hvf', '--installed',
+                                            '--columns=name,version', '--short'], text=True)
+        zig = subprocess.check_output(['zig', 'version'], text=True)
+        identity = hashlib.sha256(('\n'.join(sorted(packages.splitlines())) + zig +
+                   digest(Path(soma)) + digest(HERE / 'check') + digest(Path(__file__))).encode()).hexdigest()
+        env['SOMA_CI_CACHE_ID'] = identity
+        try:
+            state = json.loads((cache / 'state.json').read_text())
+            if not isinstance(state.get('inputs'), dict): raise ValueError('bad cache index')
+        except (OSError, ValueError):
+            state = {}
+            if (work / '.git').exists():
+                shutil.rmtree(work); work.mkdir()
+        incoming = sources(candidate)
+        sync(candidate, work, state.get('inputs', {}), incoming)
+        atomic(cache / 'state.json', {**state, 'inputs': incoming})
+        if not (work / '.git').exists():
+            git(work, 'init', '-q')
+            (work / '.git/info/exclude').write_text('.soma-cache/\n*.hvt\n*.wasm\n*.exe\n*.vo\n*.vos\n*.vok\n*.glob\n*.aux\n*.img\n*.disk\n')
+            git(work, 'commit', '-q', '--allow-empty', '-m', 'Empty CI cache baseline')
+        git(work, 'add', '-A')
+        # Candidate files are source even when their .gitignore ignores them.
+        if incoming: git(work, 'add', '-f', '--', *sorted(incoming))
+        if state.get('identity') != identity or not image_cache_valid(work, state.get('images')):
+            shutil.rmtree(work / '.soma-cache/.tests', ignore_errors=True)
+            print('CI cache: cold or invalidated; test selection will include every entry point', flush=True)
+        else:
+            print('CI cache: reusing verified images and compiler dependency records', flush=True)
+        # This is the operator's check implementation, never a candidate's CI replacement.
+        command = [sys.executable, str(HERE / 'check'), '--checkout', str(work), '--lock-fd', str(lock.fileno())]
+        process = subprocess.Popen(command, env=env, pass_fds=(lock.fileno(),),
+                                   stdout=None, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=int(match[1]))
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGTERM)
+            try: process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL); process.wait()
+            code = 124
+        if code == 0:
+            if not sources_match(work, incoming):
+                print('CI failed: the check changed candidate source files', flush=True)
+                return 86
+            git(work, 'commit', '-q', '--allow-empty', '-m', 'Passing wallet CI snapshot')
+            atomic(cache / 'state.json', {'inputs': incoming, 'identity': identity,
+                                         'images': image_manifest(work), 'head': git(work, 'rev-parse', 'HEAD', capture=True).strip()})
+            print('CI cache: saved passing source snapshot and images', flush=True)
+        return code if code in (0, 124, 137) else 86
+
+def sources_match(work, incoming):
+    return all((work / p).is_file() and digest(work / p) == metadata[0] for p, metadata in incoming.items())
+
+if __name__ == '__main__':
+    try: sys.exit(main())
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print('host-ci: ' + str(error), file=sys.stderr)
+        sys.exit(3)

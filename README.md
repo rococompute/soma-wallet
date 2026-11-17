@@ -1,5 +1,27 @@
 # Soma Wallet
 
+## Local dogfood CI
+
+`scripts/check` uses `soma test` to check the UI, crypto smoke image and Soma
+tests, then always runs the JavaScript, Python and booted-image checks. It needs
+the current Soma CLI (`soma test --help`); `SOMA=/absolute/path/to/soma` selects it
+explicitly. Ordinary local checks run all entry points.
+
+For the operator's local Pantheon market, `scripts/ci-host` implements the
+`MEMORY CHECKOUT COMMAND` adapter. Set `WALLET_CI_CACHE` to a private persistent
+directory and configure `--ci-repo wallet 'timeout 300 ./scripts/check'` with
+`--ci-sandbox /absolute/path/to/scripts/ci-host`. The adapter copies the requested
+candidate's source into a retained workspace and uses its last fully passing
+Git snapshot as `soma test --changedSince HEAD`'s baseline. Failed checks never
+advance that baseline. Generated images are hashed before reuse; missing or
+changed images invalidate test receipts. Source additions/deletions discard
+compiled state, preventing a removed module from surviving in the cache.
+
+The cache is local and disposable. Toolchain/package or runner changes widen
+selection, and a cold cache runs all entry points. The shared build lock is
+acquired before the 300-second execution budget begins. This host adapter runs
+as the operator and is not a security sandbox.
+
 A personal-use, offline Bitcoin signing wallet UI, defined with Soma's existing
 Reason-style JSX and served by a MirageOS unikernel. Private keys belong in the
 offline signing unikernel. This development baseline does not yet import keys,
