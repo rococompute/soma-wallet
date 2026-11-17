@@ -1,0 +1,2 @@
+# Keep upstream vendored bytes unchanged; its whitespace follows upstream policy.
+vendor/** -whitespace
