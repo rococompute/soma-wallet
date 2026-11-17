@@ -1,0 +1,23 @@
+Require Import Sandbox JSX.
+
+page : element unit :=
+  <html>
+    <head><title> "Offline Bitcoin Wallet" </title></head>
+    <body>
+      <main>
+        <h1> "Offline Bitcoin Wallet" </h1>
+        <p> "An offline signing workspace." </p>
+        <section>
+          <h2> "Wallet locked" </h2>
+          <p> "Key import and transaction signing are being developed. Do not load real keys into this development build." </p>
+        </section>
+        <section>
+          <h2> "Transaction review" </h2>
+          <p> "Import a test PSBT, review every output and the fee, then explicitly approve signing." </p>
+          <button disabled="disabled"> "Sign transaction" </button>
+        </section>
+      </main>
+    </body>
+  </html>.
+
+main : io unit := serve 8080 (fun _ => ret (http_response (render page))).

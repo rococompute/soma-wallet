@@ -1,0 +1,18 @@
+{
+  "soma_head": "0f42c028dd64f630c3b2f8785bd1987e79568d29",
+  "soma_source_changes": "",
+  "secp256k1_tag": "v0.6.0",
+  "secp256k1_commit": "0cdc758a56360bf58a851fe91085a327ec97685a",
+  "checks": {
+    "wasm_host_imports": [],
+    "secp256k1_node_probe": 31,
+    "invalid_private_key": 0,
+    "secp256k1_unikernel_probe": 31,
+    "reason_style_jsx_http_host_only": true
+  },
+  "limitations": [
+    "This is a capability probe with a public test key, not a completed wallet or a production security assessment.",
+    "Soma.Crypto does not provide native secp256k1; the proposed dependency is wallet-local WASM.",
+    "Secret-key generation, encrypted persistence, PSBT parsing/sighash policy and transaction-review UI still require application implementation and testing."
+  ]
+}

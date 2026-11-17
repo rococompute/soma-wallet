@@ -1,0 +1,16 @@
+.soma-cache/
+*.hvt
+*.wasm
+*.exe
+*.vo
+*.vos
+*.vok
+*.glob
+*.aux
+*.img
+*.disk
+*.key
+*.secret
+.wallet-secrets/
+node_modules/
+.DS_Store

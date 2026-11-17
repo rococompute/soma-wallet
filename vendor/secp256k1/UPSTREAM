@@ -1,0 +1,5 @@
+repository https://github.com/bitcoin-core/secp256k1
+tag v0.6.0
+commit 0cdc758a56360bf58a851fe91085a327ec97685a
+license MIT (COPYING)
+source directories include/ and src/ copied unchanged

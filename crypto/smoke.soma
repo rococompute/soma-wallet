@@ -1,0 +1,5 @@
+Import Sandbox.
+Import crypto.crypto_probe.
+main : io unit :=
+  print ("secp256k1 valid-key + pubkey + known-generator + signature + tamper-rejection flags = " ++ to_string (probe 1 0)) ;;
+  print ("invalid zero private key is rejected = " ++ to_string (probe 0 0)).

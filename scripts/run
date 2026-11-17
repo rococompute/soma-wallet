@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+./scripts/check
+exec opam exec --switch=hvf -- solo5-vmnet --mode=host --isolate -- solo5-hvt --mem=256 -- "$PWD/main.hvt"
